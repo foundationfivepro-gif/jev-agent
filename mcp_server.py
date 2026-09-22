@@ -38,6 +38,7 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
+from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
@@ -162,6 +163,26 @@ class ActionPolicyDecision(BaseModel):
     reason: str
     matched: str = Field(description="Which policy side matched: allowed, blocked or unlisted.")
     confidence: float
+
+
+class ModelRouteDecision(BaseModel):
+    """Which executor model to hand a task to."""
+
+    selected: str = Field(description=(
+        "Catalog key to pass as the Agent tool's `model` parameter (haiku, sonnet, opus, "
+        "fable), or 'human' when none should attempt it unaided."
+    ))
+    model_id: str | None = Field(description="API model id for `selected`; null for 'human'.")
+    proposed: str | None = Field(description="What Jev proposed before the confidence gate.")
+    confidence: float = Field(description="Jev's certainty in `proposed`, 0..1.")
+    complexity: float | None = Field(
+        description="0=mechanical, 1=standard, 2=multi-step, 3=frontier."
+    )
+    probabilities: dict[str, float] = Field(description="Probability mass per candidate.")
+    source: Literal["policy", "model"]
+    cost_per_mtok: dict[str, float] = Field(
+        description="{'in': .., 'out': ..} USD per million tokens for `selected`."
+    )
 
 
 # ----------------------------------------------------------------------- tools
@@ -511,6 +532,68 @@ def jev_check_action(
         )
     return ActionPolicyDecision(
         verdict=d.verdict, reason=d.reason, matched=d.matched, confidence=round(d.confidence, 3),
+    )
+
+
+@mcp.tool(
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": True},
+)
+def jev_route_model(
+    task: Annotated[str, Field(description=(
+        "The complete subtask you are about to delegate, in one or two sentences. "
+        "Include what must come back — the route depends on it."
+    ))],
+    needs_browser: Annotated[bool, Field(default=False, description=(
+        "Whether the executor must drive a browser. Only matters for catalogs that "
+        "mark some models browser-incapable."
+    ))] = False,
+    max_cost_in: Annotated[float, Field(default=1e9, description=(
+        "Exclude models whose input price per million tokens exceeds this."
+    ))] = 1e9,
+    catalog: Annotated[dict | None, Field(default=None, description=(
+        "Optional override: {name: {fit, cost_in, cost_out, tier, id?}}. Omit to use "
+        "the built-in Claude catalog (haiku, sonnet, opus, fable at first-party rates)."
+    ))] = None,
+) -> ModelRouteDecision:
+    """
+    Pick the cheapest Claude model that should pass, before spawning a subagent.
+
+    Pass `selected` straight to the Agent tool's `model` parameter. The catalog
+    is ordered by price, and Fable sits at the TOP of it — twice Opus per token
+    — so it is what comes back when Opus is judged insufficient, never a default.
+
+    Fails toward capability: below 75% confidence the strongest ordinary tier
+    (Opus) is returned, because a cheap failure costs the cheap attempt plus the
+    expensive retry plus the latency of noticing. Fable is escalation-only — it
+    comes back only when Jev proposes it with confidence, never as the fallback
+    for an uncertain route. `human` means do not delegate.
+
+    This decides *which* model; whether to delegate at all is a separate
+    question answered by compression ratio, not difficulty — a subagent that
+    reads a lot and returns a few sentences pays, one whose full output you must
+    re-read does not. See the delegation-economics skill.
+    """
+    _require_key()
+    if not task.strip():
+        raise ValueError("task is empty")
+
+    cat = catalog or DEFAULT_CATALOG
+    try:
+        d = route_model(task, catalog=cat, needs_browser=needs_browser, max_cost_in=max_cost_in)
+    except TransportError as exc:
+        raise ValueError(f"Jev unreachable: {exc}") from exc
+
+    chosen = cat.get(d["selected"], {})
+    return ModelRouteDecision(
+        selected=d["selected"],
+        model_id=chosen.get("id"),
+        proposed=None if d.get("proposed") is None else str(d["proposed"]),
+        confidence=round(float(d.get("confidence", 0.0)), 3),
+        complexity=None if d.get("complexity") is None else round(float(d["complexity"]), 2),
+        probabilities={k: round(float(v), 3) for k, v in (d.get("probabilities") or {}).items()},
+        source=d.get("source", "model"),
+        cost_per_mtok={"in": chosen.get("cost_in", 0.0), "out": chosen.get("cost_out", 0.0)},
     )
 
 

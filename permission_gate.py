@@ -54,7 +54,7 @@ DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b", "pipe download to shell"),
     (r">\s*/dev/(sd[a-z]|nvme\d|disk\d)", "write to raw device"),
     (r":\(\)\s*\{.*\|.*&.*\}\s*;", "fork bomb"),
-    (r"\bgit\b[^|;]*\bpush\b[^|;]*(--force|-f)\b", "force push"),
+    (r"\bgit\b[^|;]*\bpush\b[^|;]*(--force(?!-with-lease)|-f)\b", "force push"),
     (r"\bchmod\b\s+(-[a-zA-Z]+\s+)*777\b", "chmod 777"),
     (r"\bhistory\s+-c\b", "clear shell history"),
 )

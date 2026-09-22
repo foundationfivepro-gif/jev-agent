@@ -27,14 +27,28 @@ from core import Choice, Score, decide, write_trace
 
 MIN_CONFIDENCE = 0.75
 
-# cost_in / cost_out are per million tokens.
+# cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
+# Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
+# Fable is the top of the range, not a cheap tier: it costs twice Opus. It is
+# escalation_only — Jev may propose it with confidence, but an *uncertain* route
+# falls back to the strongest ordinary tier (Opus), never up to Fable.
 DEFAULT_CATALOG: dict[str, dict] = {
-    "fast":     {"fit": "Classification, formatting, simple mechanical edits",
-                 "cost_in": 1.0, "cost_out": 5.0, "tier": 1, "browser": False},
-    "balanced": {"fit": "Normal coding, research, multi-file edits",
-                 "cost_in": 3.0, "cost_out": 15.0, "tier": 2, "browser": True},
-    "strong":   {"fit": "Complex architecture, hard debugging, subtle refactors",
-                 "cost_in": 15.0, "cost_out": 75.0, "tier": 3, "browser": True},
+    "haiku":  {"id": "claude-haiku-4-5",
+               "fit": "Classification, formatting, simple mechanical edits, "
+                      "search-and-report subtasks that return a short answer",
+               "cost_in": 1.0, "cost_out": 5.0, "tier": 1},
+    "sonnet": {"id": "claude-sonnet-5",
+               "fit": "Normal coding, research, multi-file edits, "
+                      "most day-to-day engineering",
+               "cost_in": 2.0, "cost_out": 10.0, "tier": 2},
+    "opus":   {"id": "claude-opus-5",
+               "fit": "Complex architecture, hard debugging, subtle refactors, "
+                      "work where a wrong answer is expensive to detect",
+               "cost_in": 5.0, "cost_out": 25.0, "tier": 3},
+    "fable":  {"id": "claude-fable-5-1",
+               "fit": "The hardest long-horizon agentic work, only when Opus is "
+                      "genuinely insufficient; never for routine tasks",
+               "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
 
 
@@ -49,7 +63,10 @@ def estimate_costs(
     whether routing actually pays at *their* prices and context size.
     """
     names = sorted(catalog, key=lambda k: catalog[k]["tier"])
-    cheap, strong = catalog[names[0]], catalog[names[-1]]
+    # The comparison is against the model the router actually falls back to,
+    # so escalation-only tiers are not the benchmark.
+    ordinary = [n for n in names if not catalog[n].get("escalation_only")] or names
+    cheap, strong = catalog[names[0]], catalog[ordinary[-1]]
 
     pure = {
         n: catalog[n]["cost_out"] * output_mtok + catalog[n]["cost_in"] * tool_mtok
@@ -65,7 +82,7 @@ def estimate_costs(
     return {
         "pure": pure,
         "delegated": delegated,
-        "delegation_wins": delegated < pure[names[-1]],
+        "delegation_wins": delegated < pure[ordinary[-1]],
         "cheapest_pure": best_pure,
         "note": "Delegation pays only when the returned result is much smaller "
                 "than the context it was derived from. Compression ratio decides "
@@ -84,7 +101,7 @@ def route_model(
     """Choose the cheapest eligible executor that should succeed."""
     eligible = {
         k: v for k, v in catalog.items()
-        if v["cost_in"] <= max_cost_in and (v["browser"] or not needs_browser)
+        if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
     }
     if not eligible:
         decision = {"selected": "human", "reason": "no eligible model", "source": "policy"}
@@ -110,8 +127,10 @@ def route_model(
     answer = result.answers["model"]
     # Fail closed toward capability: an uncertain route goes to the strongest
     # eligible model, because a cheap failure costs the cheap attempt plus the
-    # expensive retry plus the latency of noticing.
-    strongest = max(eligible, key=lambda k: eligible[k]["tier"])
+    # expensive retry plus the latency of noticing. Escalation-only tiers are
+    # excluded from that fallback — uncertainty is not a reason to pay double.
+    ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
+    strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
     selected = str(answer.value) if answer.certainty >= min_confidence else strongest
     if selected not in eligible and selected != "human":
         selected = strongest

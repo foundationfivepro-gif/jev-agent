@@ -10,7 +10,7 @@ transport — see "One transport, on purpose" below.
 pip install -r requirements.txt
 cp .env.example .env      # set AI_GATEWAY_API_KEY
 python -m pytest tests/ -q
-./install.sh all          # skills + MCP registration for Claude Code and Codex
+./install.sh all          # skills + hooks + policy + MCP registration for Claude Code and Codex
 ```
 
 ## Deploying to Claude Code and Codex
@@ -32,7 +32,7 @@ frontmatter — so one set of files serves both. `install.sh skills` copies them
 `~/.claude/skills` and `~/.agents/skills`. They load when their description matches.
 Files on disk do **not** sync to mobile; only skills saved to your Claude account do.
 
-**MCP server.** A local stdio process exposing seven read-only tools — five for
+**MCP server.** A local stdio process exposing eight read-only tools — six for
 coding agents, two for automation harnesses. It decides; it never edits files or
 runs commands.
 
@@ -43,10 +43,42 @@ runs commands.
 | `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
 | `jev_evaluate` | arbitrary typed decisions |
 | `jev_file_outline` | exported symbols without loading the file; local-only |
+| `jev_route_model` | before spawning a subagent — cheapest Claude model that should pass; `selected` goes straight into the Agent tool's `model`. Fable is the top of the catalog at 2× Opus, never the default |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
 | `jev_check_action` | before any action with external effect, against plain-English policy |
 
 `./install.sh mcp` prints the exact registration for Claude Code and Codex.
+
+**Hooks (Claude Code only).** The tools are advisory — the agent calls them when it
+thinks to. `hooks.py` makes three of them events Claude Code runs on its own:
+
+| event | hook | what runs |
+|---|---|---|
+| `UserPromptSubmit` | `prompt` | one Jev call per prompt: complexity and whether repository context is needed, injected as a one-line note |
+| `PreToolUse` on `Bash` | `gate-bash` | `jev_gate_command`; a hard block is deterministic and needs no key |
+| `PreToolUse` on `Agent\|Task` | `route-agent` | `jev_route_model`; sets `model` on a subagent that did not choose one |
+
+`./install.sh hooks` merges them into `~/.claude/settings.json` (user scope, so every
+session), places the defaults policy (`CLAUDE.md`) in `~/.claude/CLAUDE.md` and
+`~/.codex/AGENTS.md`, and registers the server in `~/.codex/config.toml` when Codex is
+present. Codex and Cursor have no equivalent hook surface; there the policy file and the
+skills are the mechanism, and `jev_route_model` is a decision the agent reports rather
+than one the harness applies.
+
+Because a hook runs on every event, it is built around three rules:
+
+- **A hook never bypasses your own permission rules.** On `allow` it says nothing. An
+  unreachable Jev, or one that has not answered within 20 seconds, becomes `ask` — a
+  hook that outlives Claude Code's timeout is killed and the call proceeds ungated, so
+  the deadline is answered explicitly, not waited out.
+- **`deny` is reserved for the irreversible**, because the user cannot override it:
+  the dangerous-construct patterns and `rm` aimed at root, home or a wildcard. A plain
+  `rm -f build/tmp.o`, or a line `shlex` cannot parse, is `ask` — the MCP tool's
+  advisory hard block would deny both, and a gate that denies routine commands is a
+  gate that gets switched off.
+- **Prompt text and command lines leave the machine** — that is what a judgement
+  costs. Anything credential-shaped is classified locally, held back, and turned into
+  `ask` without being sent.
 
 **Cursor** differs twice, so it has its own installer. It does not read
 `SKILL.md` — its equivalent is `.cursor/rules/*.mdc`, different frontmatter — and
@@ -155,10 +187,13 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `conditional_agents.py` | which repo rules constrain this task | Jev |
 | `background_review.py` | which read-only reviewers to run | Jev |
 | `control_loop.py` | assemble and gate the execution packet | — |
+| `hooks.py` | Claude Code hook adapters: prompt evaluation, Bash gate, subagent routing | Jev |
 
-`python -m pytest tests/ -q` — 61 tests, 52 of which need no key. Two of them are
+`python -m pytest tests/ -q` — 81 tests, 74 of which need no key. Two of them are
 integration guards: every MCP tool must import from a real module, and every tool
-must be named in a skill. A capability no skill describes is one the agent never
+must be named in a skill. The hook tests run `hooks.py` as a subprocess with no key
+and an absent env file, so they prove the hard block and the fail-silent paths
+without touching the network. A capability no skill describes is one the agent never
 thinks to call, which is the difference between code being *in* the repo and
 being *merged* into it.
 
