@@ -5,6 +5,10 @@ description: Call TypeSafe AI's Jev evaluation model (typesafe-ai/jev) for struc
 
 # Jev — structured evaluation
 
+**Tool**: `jev_evaluate(state, questions)` on the `jev` MCP server, for decisions the
+purpose-built tools do not cover. Raw HTTP details below for when you are writing the
+client rather than calling it.
+
 Jev is an **evaluation model**, not a language model. Give it shared state and typed
 questions; it returns choices, scores and probability distributions, all evaluated in
 parallel. Reach for it when the output is a *decision*, not prose.

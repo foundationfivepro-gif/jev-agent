@@ -5,6 +5,10 @@ description: Decide per chunk whether to include, index, or exclude it from an a
 
 # Include, index, or exclude — not summarize
 
+**Tools** (the `jev` MCP server): `jev_select_context(goal, root, globs, budget_tokens)`
+scores a directory and returns the three tiers — call it **before** reading any file.
+`jev_file_outline(paths)` gives exported symbols with no model call at all.
+
 Reading and searching are ~56% of agent tool-use turns and ~46% of main-agent tokens, so
 filtering what gets read is the largest single lever on cost. Measured on 188 TypeScript
 files: **508,264 → 3,944 tokens, 99% eliminated**, for about a tenth of a cent.

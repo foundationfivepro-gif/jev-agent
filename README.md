@@ -32,8 +32,9 @@ frontmatter — so one set of files serves both. `install.sh skills` copies them
 `~/.claude/skills` and `~/.agents/skills`. They load when their description matches.
 Files on disk do **not** sync to mobile; only skills saved to your Claude account do.
 
-**MCP server.** A local stdio process exposing five read-only tools. It decides;
-it never edits files or runs commands.
+**MCP server.** A local stdio process exposing seven read-only tools — five for
+coding agents, two for automation harnesses. It decides; it never edits files or
+runs commands.
 
 | tool | use |
 |---|---|
@@ -42,6 +43,8 @@ it never edits files or runs commands.
 | `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
 | `jev_evaluate` | arbitrary typed decisions |
 | `jev_file_outline` | exported symbols without loading the file; local-only |
+| `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
+| `jev_check_action` | before any action with external effect, against plain-English policy |
 
 `./install.sh mcp` prints the exact registration for Claude Code and Codex.
 
@@ -101,7 +104,11 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `background_review.py` | which read-only reviewers to run | Jev |
 | `control_loop.py` | assemble and gate the execution packet | — |
 
-`python -m pytest tests/ -q` — 52 tests, 48 of which need no key.
+`python -m pytest tests/ -q` — 58 tests, 49 of which need no key. Two of them are
+integration guards: every MCP tool must import from a real module, and every tool
+must be named in a skill. A capability no skill describes is one the agent never
+thinks to call, which is the difference between code being *in* the repo and
+being *merged* into it.
 
 ## Harness variant (Grok Bot and similar)
 

@@ -295,3 +295,23 @@ def test_policy_gate_block_beats_allow():
     assert check_action("Delete last quarter's files", allow, block).verdict == "block"
     # Not covered by either list -> a person decides, never a silent allow.
     assert check_action("Render a chart of report volume", allow, block).verdict == "review"
+
+
+def test_harness_is_exposed_over_mcp():
+    """Files in the repo are not 'merged' until a client can reach them."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "mcp_server.py")).read()
+    assert "def jev_should_run" in src
+    assert "def jev_check_action" in src
+    assert "from harness import" in src
+
+
+def test_every_module_has_a_skill_or_is_internal():
+    """A capability no skill describes is one the agent will not think to use."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    skills = " ".join(
+        open(os.path.join(root, "skills", d, "SKILL.md")).read()
+        for d in os.listdir(os.path.join(root, "skills"))
+    )
+    for term in ("should_run", "check_action", "include, index"):
+        assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"

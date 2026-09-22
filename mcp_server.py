@@ -145,6 +145,25 @@ class Evaluation(BaseModel):
     input_tokens: int
 
 
+class ScheduledRunDecision(BaseModel):
+    """Whether a scheduled automation should execute this time."""
+
+    decision: Literal["proceed", "skip", "escalate"]
+    reason: str
+    proceed_probability: float = Field(description="Probability there is new material to act on.")
+    novelty: float = Field(description="0=nothing new, 3=unusually large.")
+    source: Literal["policy", "model"]
+
+
+class ActionPolicyDecision(BaseModel):
+    """Whether a proposed action satisfies allow/block policy."""
+
+    verdict: Literal["allow", "block", "review"]
+    reason: str
+    matched: str = Field(description="Which policy side matched: allowed, blocked or unlisted.")
+    confidence: float
+
+
 # ----------------------------------------------------------------------- tools
 
 
@@ -405,6 +424,94 @@ def jev_file_outline(
         except Exception as exc:
             out[raw] = f"[unreadable: {type(exc).__name__}]"
     return out
+
+
+@mcp.tool(
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": True},
+)
+def jev_should_run(
+    automation: Annotated[str, Field(description="Name of the scheduled automation.")],
+    purpose: Annotated[str, Field(description="What a full run of it does, in one sentence.")],
+    signals: Annotated[dict, Field(description=(
+        "Cheap observations only — counts, timestamps, filenames. NEVER the underlying "
+        "data; if gathering these is expensive the gate has already lost. Include a "
+        "baseline such as typical_new_files_per_run, or 'is this larger than normal' "
+        "is unanswerable."
+    ))],
+    force_after_skips: Annotated[int | None, Field(default=None, description=(
+        "Proceed unconditionally after this many consecutive skips. A gate that can "
+        "skip forever eventually skips through something real."
+    ))] = None,
+) -> ScheduledRunDecision:
+    """
+    Decide whether a scheduled automation needs to run this time, before running it.
+
+    For recurring jobs — a nightly ingest, a weekly report pull — most executions
+    find nothing worth the pipeline. This costs a fraction of a cent and skips
+    the rest. Where `jev_select_context` saves tokens within a task, this avoids
+    the task entirely, which matters more at high frequency.
+
+    Fails **open**: when uncertain it returns proceed, because skipping a run
+    that mattered loses data silently while running a redundant one only costs
+    tokens. `escalate` means the signals look anomalous enough that a person
+    should look before automation acts — treat it as a stop, not a slow proceed.
+    """
+    _require_key()
+    from harness import should_run
+
+    try:
+        d = should_run(automation, purpose, signals, force_if_stale_runs=force_after_skips)
+    except TransportError as exc:
+        raise ValueError(f"Jev unreachable: {exc}") from exc
+    return ScheduledRunDecision(
+        decision=d.action, reason=d.reason,
+        proceed_probability=round(d.proceed_probability, 3),
+        novelty=round(d.novelty, 3), source=d.source,
+    )
+
+
+@mcp.tool(
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": True},
+)
+def jev_check_action(
+    action: Annotated[str, Field(description="The proposed action, described plainly.")],
+    allow: Annotated[list[str], Field(description=(
+        "Plain-English sentences describing what is permitted. These are matched "
+        "semantically, so near-misses of the exact wording still resolve."
+    ))],
+    block: Annotated[list[str], Field(default=[], description=(
+        "Plain-English sentences describing what is forbidden. Evaluated FIRST and "
+        "always wins — an action matching both is blocked."
+    ))] = [],
+) -> ActionPolicyDecision:
+    """
+    Judge a proposed action against allow/block policy written in plain English.
+
+    Use before acting on anything with external effect — posting, emailing,
+    paying, deleting. This generalises a hand-maintained list of permitted
+    phrasings: a literal list only fires on wording someone anticipated, while
+    the same sentences used as criteria let adjacent cases resolve correctly.
+
+    Fails **closed**. Anything not covered by either list comes back `review`,
+    never a silent allow, and an otherwise-allowed action that looks hard to
+    undo is also sent to review. Do not act on `block` or `review`.
+    """
+    _require_key()
+    from harness import check_action
+
+    try:
+        d = check_action(action, allow, block)
+    except TransportError as exc:
+        # An unreachable judge is not permission to proceed.
+        return ActionPolicyDecision(
+            verdict="review", reason=f"Jev unreachable ({exc}); failing closed.",
+            matched="", confidence=0.0,
+        )
+    return ActionPolicyDecision(
+        verdict=d.verdict, reason=d.reason, matched=d.matched, confidence=round(d.confidence, 3),
+    )
 
 
 if __name__ == "__main__":

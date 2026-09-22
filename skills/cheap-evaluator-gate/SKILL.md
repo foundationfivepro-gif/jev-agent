@@ -5,6 +5,10 @@ description: Put a cheap evaluation model in front of expensive work — relevan
 
 # Gating expensive work behind a cheap evaluator
 
+**Tools**: `jev_gate_command(command, cwd)` before running a shell command;
+`jev_classify_data(paths, content)` before sending content anywhere (local-only, no
+model call); `jev_select_context(...)` before reading files.
+
 Before spending a lot of tokens, spend a few deciding whether to. See `jev-evaluation` for the
 API; this is about when the trade pays.
 
