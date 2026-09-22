@@ -254,3 +254,44 @@ def test_small_chunks_are_never_indexed():
         Chunk("tiny", "def login(): ...", path="src/auth.py"),
     ])
     assert out.indexed == []
+
+
+# ---------------------------------------------------- harness (Grok Bot) gates
+
+def test_run_gate_stale_floor_is_deterministic():
+    """A gate that can skip forever eventually skips through something real."""
+    from harness import should_run
+    d = should_run("x", "y", {"consecutive_skipped_runs": 10}, force_if_stale_runs=10)
+    assert d.action == "proceed" and d.source == "policy"
+
+
+@live
+def test_run_gate_skips_a_quiet_run():
+    from harness import should_run
+    d = should_run("more-weekday-ingest", "Ingest MORE reports and surface CRM changes",
+                   {"new_files_since_last_run": 0, "typical_new_files_per_run": 8,
+                    "consecutive_empty_runs": 4, "last_run_found_changes": False})
+    assert d.action == "skip", d.reason
+
+
+@live
+def test_run_gate_escalates_a_catch_up_flood():
+    """4000 files after a six-month gap must reach a human, not the pipeline."""
+    from harness import should_run
+    d = should_run("more-weekday-ingest", "Ingest MORE reports and surface CRM changes",
+                   {"new_files_since_last_run": 4000, "typical_new_files_per_run": 8,
+                    "consecutive_empty_runs": 0, "last_run": "2026-03-01T06:00:00Z",
+                    "today": "2026-09-22"})
+    assert d.action == "escalate", d.reason
+
+
+@live
+def test_policy_gate_block_beats_allow():
+    from harness import check_action
+    allow = ["Create recurring automations that ingest reports into the CRM."]
+    block = ["Anything that emails customers, moves money, or deletes records."]
+    assert check_action("Set up a weekly MORE ingest into the CRM", allow, block).verdict == "allow"
+    assert check_action("Email every customer about the report", allow, block).verdict == "block"
+    assert check_action("Delete last quarter's files", allow, block).verdict == "block"
+    # Not covered by either list -> a person decides, never a silent allow.
+    assert check_action("Render a chart of report volume", allow, block).verdict == "review"

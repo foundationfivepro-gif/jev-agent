@@ -22,6 +22,7 @@ Two artifacts with different reach. Do not confuse them.
 | Claude Code desktop + CLI | `SKILL.md` → `~/.claude/skills` | yes |
 | Codex CLI | `SKILL.md` → `~/.agents/skills` (same files) | yes |
 | Cursor | `.mdc` → `<repo>/.cursor/rules` (converted, per repo) | yes |
+| Grok CLI | **already reads `~/.claude/skills`** via `[compat.claude]` | yes — `[mcp_servers.jev]` in `~/.grok/config.toml` |
 | Claude mobile | only if saved to your **account** | no (local process) |
 | needs a key | no | yes |
 | what it does | makes the agent decide better | does the deciding, and saves the tokens |
@@ -101,6 +102,40 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `control_loop.py` | assemble and gate the execution packet | — |
 
 `python -m pytest tests/ -q` — 52 tests, 48 of which need no key.
+
+## Harness variant (Grok Bot and similar)
+
+`harness.py` carries the patterns for an automation harness rather than a coding
+agent. The economics differ: a coding agent is one long session with a large
+context, so the win is reducing context per task; a harness is many short runs at
+high frequency, so the win is **not running at all**.
+
+| | `should_run()` | `check_action()` |
+|---|---|---|
+| decides | does this scheduled execution need to proceed | does a proposed action satisfy policy |
+| fails | **open** — when unsure, run | **closed** — when unsure, review |
+
+For a weekday job where ~70% of runs find nothing, ~180 full pipelines a year are
+avoided for roughly a cent of gating.
+
+`check_action` generalises a hand-maintained allow/block list. A literal list of
+sentences only fires on the wording someone anticipated; handing the same
+sentences to Jev as *criteria* lets near-matches resolve while the policy stays
+readable. Block is evaluated first and always wins.
+
+Two things learned building it, both worth copying:
+
+**Word the question around the harm, not around deviation.** An earlier anomaly
+question asked about "a spike, a long gap, or a pattern unlike a routine run" —
+which made four consecutive quiet runs read as anomalous. Quiet is the normal
+state of a recurring job.
+
+**Give a gate a baseline.** "Is this far larger than normal" is unanswerable
+without knowing normal. Adding `typical_new_files_per_run` moved the anomaly
+score on a 4000-file catch-up run from 0.73 to 0.86 — across the escalation
+threshold. The anomaly question is also asked in its **own call**, because the
+same question scored 0.73 batched and 0.86 alone: a safety judgement should not
+depend on what else was in the batch.
 
 ## Three things that differ from the engineering guide
 
