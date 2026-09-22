@@ -1,0 +1,204 @@
+# jev-agent
+
+Jev decision modules, built on the official `typesafe-sdk`. Jev is the **only**
+external model — every other step is deterministic code.
+
+Transport is the **Vercel AI Gateway** (`typesafe-ai/jev`). That is the only
+transport — see "One transport, on purpose" below.
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env      # set AI_GATEWAY_API_KEY
+python -m pytest tests/ -q
+./install.sh all          # skills + MCP registration for Claude Code and Codex
+```
+
+## Deploying to Claude Code and Codex
+
+Two artifacts with different reach. Do not confuse them.
+
+| | skills / rules | MCP server (`mcp_server.py`) |
+|---|---|---|
+| Claude Code desktop + CLI | `SKILL.md` → `~/.claude/skills` | yes |
+| Codex CLI | `SKILL.md` → `~/.agents/skills` (same files) | yes |
+| Cursor | `.mdc` → `<repo>/.cursor/rules` (converted, per repo) | yes |
+| Claude mobile | only if saved to your **account** | no (local process) |
+| needs a key | no | yes |
+| what it does | makes the agent decide better | does the deciding, and saves the tokens |
+
+**Skills.** Codex and Claude use the same `SKILL.md` contract — `name` + `description`
+frontmatter — so one set of files serves both. `install.sh skills` copies them to
+`~/.claude/skills` and `~/.agents/skills`. They load when their description matches.
+Files on disk do **not** sync to mobile; only skills saved to your Claude account do.
+
+**MCP server.** A local stdio process exposing five read-only tools. It decides;
+it never edits files or runs commands.
+
+| tool | use |
+|---|---|
+| `jev_select_context` | **before reading files** — 508k → 3.9k tokens on a 188-file repo |
+| `jev_gate_command` | before running any shell command |
+| `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
+| `jev_evaluate` | arbitrary typed decisions |
+| `jev_file_outline` | exported symbols without loading the file; local-only |
+
+`./install.sh mcp` prints the exact registration for Claude Code and Codex.
+
+**Cursor** differs twice, so it has its own installer. It does not read
+`SKILL.md` — its equivalent is `.cursor/rules/*.mdc`, different frontmatter — and
+those rules are **project-scoped**, not global, so they install per repository
+while the MCP config installs once.
+
+```bash
+./install.sh cursor ~/code/myproject        # rules + mcp.json
+python3 install_cursor.py --repo ~/code/x --dry-run
+python3 install_cursor.py --mcp-only        # server only
+```
+
+The rules convert to *agent-selected* mode (`alwaysApply: false`), which is the
+closest analogue to how a skill behaves — Cursor pulls one in when its
+description matches. `context-tiering` and `jev-evaluation` also carry `globs` so
+they auto-attach when relevant source files are in context.
+
+The `mcp.json` write is a **merge**: existing servers are preserved, a timestamped
+backup is written first, and an unparseable file is refused rather than
+overwritten. Cursor does not expand shell variables in `mcp.json`, so pass
+`--key` or point `env` at an `envFile`.
+
+## One transport, on purpose
+
+A direct `api.typesafe.ai` path was written and removed. With no TypeSafe key to
+exercise it, it would have been untested code reached only when something had
+already gone wrong — the worst kind to ship.
+
+`typesafe-sdk` remains a dependency for its question *types* only. They are
+pydantic models that reject a malformed `criteria` before any network call — a
+Score handed a string, a Choice handed a list — which is the single easiest
+mistake to make with this API. The SDK's client is unused.
+
+Because the gateway is the production transport, every number below was measured
+on the path that will actually run. They are not estimates carried over from a
+different endpoint.
+
+## Modules
+
+All ten systems from the engineering guide, plus the runtime they share.
+
+| file | decision | model? |
+|---|---|---|
+| `core.py` | gateway transport, size-aware batching, traces | — |
+| `canary.py` | detects Jev's silent failure mode | — |
+| `symbols.py` | exported symbols via `ast` / ast-grep | no — parser |
+| `permission_gate.py` | allow / review / block one command | Jev |
+| `security_router.py` | classify data, pick a permitted provider | Jev |
+| `tool_router.py` | select one tool, or none | Jev |
+| `context_tier.py` | include / index / exclude per chunk | Jev |
+| `compaction.py` | full / index / drop per history chunk | Jev |
+| `model_router.py` | pick the executor model | Jev |
+| `subagents.py` | smallest sufficient read-only worker plan | Jev |
+| `conditional_agents.py` | which repo rules constrain this task | Jev |
+| `background_review.py` | which read-only reviewers to run | Jev |
+| `control_loop.py` | assemble and gate the execution packet | — |
+
+`python -m pytest tests/ -q` — 52 tests, 48 of which need no key.
+
+## Three things that differ from the engineering guide
+
+**1. Question ids do not bind to state keys.** Every question is evaluated
+against the *whole* state. A question with id `f3` has no implicit link to
+`state.chunks.f3` — it must say so in its instructions. Getting this wrong
+returns confident, uniform, wrong answers **with no error**; measured separation
+between relevant and irrelevant items collapsed from 1.91 to 0.01.
+
+Every fan-out here runs known-answer canaries and raises if they fail to
+separate. `tests/test_all.py::test_canary_catches_broken_binding` reproduces the
+bug deliberately and asserts the detector fires.
+
+**2. The per-call ceiling is payload BYTES, not question count.** Question count
+is what gets tuned (`MAX_QUESTIONS=50`; ~150 works in isolation, 170+ hard-fails),
+but size is what actually binds. Enriching each item's state — adding real
+signatures from ast-grep — made batches of 50 start failing that had worked at 50
+before, with no change in count. `decide_batched` therefore packs to
+`MAX_PAYLOAD_CHARS` as well as to a count.
+
+It also takes a **callable** for state, so each batch carries only the items its
+own questions ask about. A fixed state is re-sent in full with every batch — a
+188-item fan-out sent the whole corpus four times and 503'd.
+
+**2b. Scores are only comparable within a batch.** Each question is told to judge
+one item, but its batch-mates are still in state and shift the answer: the same
+corpus split into smaller batches moved recall from 7/8 to 6/8 with nothing else
+changed. `context_tier.select` runs a second pass over the top candidates in a
+single call so boundary decisions are made on common footing. Ranking across
+batches without that compares numbers produced under different conditions.
+
+**3. "Summarize" is not a context tier.** The guide's compaction offers
+full / summary / drop. Tested with the original source visible to the judge:
+
+| check | result |
+|---|---|
+| could a developer modify this from the summary alone | **0.41 – 0.47, fails** |
+| does it point at the symbols they need | **0.77 – 0.94, passes** |
+
+Both a cheap model and a careful hand-written summary failed substitution, so a
+better summarizer is not the fix. For small files the summary came out at
+132–320% of the original — larger than the file it replaced. So the middle tier
+is **index** (path, doc line, exported symbols, from a parser) and nothing under
+`MIN_INDEX_TOKENS` is ever indexed.
+
+This also satisfies the Jev-only constraint: no generative model is needed
+anywhere in the loop.
+
+## Two security fixes
+
+The guide's versions fail **open** on the cases they exist to catch.
+
+Its secret regex requires a keyword followed by `:` or `=`, catching 1 of 6
+realistic formats — it misses the PEM block its own verification step tells you
+to test with. `security_router.classify` now covers PEM/OpenSSH/PGP armour,
+provider key prefixes, JWTs, connection strings, header forms and high-entropy
+blobs, and fails closed. 15/15 on the test corpus.
+
+Its hard block tests `argv[0]`, so `rm -rf /` is blocked but `/bin/rm -rf /`,
+`sudo rm -rf /`, `bash -c 'rm -rf /'` and `find . -delete` all pass.
+`permission_gate.extract_commands` resolves paths, follows wrappers, recurses
+into `sh -c`, and splits pipelines. The block list is deliberately narrow —
+irreversible only — because false positives are how a gate gets switched off.
+
+## Measured
+
+188 TypeScript files, 195k tokens, goal "find where JWT is verified and expiry
+handled":
+
+```
+recall@8: 6/8
+4 included, 3 indexed, 182 excluded | 3,947/195,103 tokens (98% saved)
+canary: ok (separation 0.70)
+elapsed: 4.6s
+```
+
+Read that recall figure with care — the ground truth is "path contains jwt",
+which is crude. The two misses are `jwa.ts` (algorithm name constants) and
+`utf8.ts` (a text-encoding helper); the two false positives are `jwk/jwk.ts`
+(JSON Web Key, used *for* JWT verification) and `bearer-auth` (token extraction).
+For the stated goal the ranking is arguably better than the labels, which is a
+reason to build a real labelled set before tuning against this number.
+
+An earlier run scored 7/8 by sending all 188 items with full state in two large
+batches. That is more comparable and less reliable — it 503s as state grows. The
+tradeoff is real: bigger batches calibrate better, smaller batches survive.
+
+## Caveats
+
+`symbols.py` parses Python with `ast` and TypeScript with regex. Use `ast-grep`
+or `tree-sitter` for the latter in production.
+
+The substitution finding rests on two files judged by one evaluator. It is
+strong enough to stop you building a summarize tier for code, and worth
+re-testing before applying it to prose, where compression may behave differently
+— prose restates, code specifies.
+
+Six of the ten systems in the engineering guide are not built here: tool router,
+compaction, model router, subagents, conditional AGENTS.md, structured skills and
+background review. They are straightforward on this base now that `core.py`,
+tracing and canaries exist.

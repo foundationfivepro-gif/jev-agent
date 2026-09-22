@@ -1,0 +1,79 @@
+---
+name: jev-evaluation
+description: Call TypeSafe AI's Jev evaluation model (typesafe-ai/jev) for structured decisions — routing, classification, rubric scoring, relevance filtering, verification. Use when writing or debugging code that calls Jev, or choosing whether a decision belongs to Jev rather than a chat model.
+---
+
+# Jev — structured evaluation
+
+Jev is an **evaluation model**, not a language model. Give it shared state and typed
+questions; it returns choices, scores and probability distributions, all evaluated in
+parallel. Reach for it when the output is a *decision*, not prose.
+
+## Endpoint
+
+```
+POST https://ai-gateway.vercel.sh/v1/evaluate      model: typesafe-ai/jev
+Authorization: Bearer $AI_GATEWAY_API_KEY
+```
+
+Direct API is `api.typesafe.ai` via `typesafe-sdk`, model id `jev-latest`. OpenRouter uses
+`typesafe/jev-latest`. **The three namespaces do not interchange.** Sending to
+`/v1/chat/completions` returns `ModelTypeMismatchError`.
+
+## Request
+
+```json
+{"model": "typesafe-ai/jev",
+ "state": {"ticket": "Checkout 500s when applying a coupon."},
+ "questions": {
+   "is_bug":   {"type": "boolean", "instructions": "Is this a defect?"},
+   "severity": {"type": "score",   "criteria": ["trivial","minor","major","critical"]},
+   "team":     {"type": "choice",  "criteria": {"payments": "Billing", "infra": "Servers"}}}}
+```
+
+`questions` is a **record keyed by id**, not an array. Each needs `criteria` or
+`instructions`. The SDK calls the yes/no type `noul`; the gateway calls it `boolean`.
+
+## ⚠ Question ids do NOT bind to state keys
+
+Every question is evaluated against the **entire state**. Id `f3` has no implicit link to
+`state.chunks.f3` — say so in the instructions.
+
+```python
+# WRONG — scores the whole corpus; answers collapse to one value
+questions[cid] = Noul(instructions="Is this chunk relevant?")
+# RIGHT
+questions[cid] = Noul(instructions=
+    f"Consider ONLY the chunk whose id is '{cid}' in state.chunks, ignoring every other "
+    f"chunk. Could it materially change the answer to the goal?")
+```
+
+Measured on 188 files: implicit binding gave separation **0.01** (0% recall); explicit gave
+**1.91** (88%). It fails **silently** — confident, plausible, uniformly wrong. Put
+known-answer canaries in every fan-out and assert they separate.
+
+## Types
+
+| type | criteria | returns |
+|---|---|---|
+| `boolean`/`noul` | `{true,false}` or use `instructions` | `{probability}` — **no confidence field** |
+| `score` | ordered `str[]` low→high | `{score, probabilities, confidence}` |
+| `choice` | `{option: description}` | `{choice, probabilities, confidence}` |
+
+Booleans return a probability, not a verdict; derive certainty as `abs(p-0.5)*2` and set the
+threshold at the call site. **Gate on the probability mass of bad outcomes, not confidence** —
+a safe command scored P(block)=0 with confidence 0.69, and a 0.90 confidence gate wrongly sent
+it to review. Gates that fire on safe input get switched off.
+
+## Batching
+
+Input ~$0.042/M, **output $0**, 32k context. **The binding ceiling is payload BYTES, not
+question count.** ~150 questions work in isolation, 170+ hard-fails; but enriching per-item
+state made batches of 50 start failing that worked at 50. Pack to ~24k chars AND ~50
+questions, and slice state so each batch carries only its own items.
+
+**Scores are comparable only within a batch** — batch-mates shift each answer; the same corpus
+split differently moved recall 7/8 → 6/8. Re-score top candidates together before deciding.
+
+Errors: gateway 400/503, direct 422/529. A 429 carries `Retry-After: 60`; a backoff capped
+below that burns the budget without ever waiting long enough.

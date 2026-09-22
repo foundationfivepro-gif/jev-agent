@@ -1,0 +1,18 @@
+# Secrets — never commit
+.env
+*.key
+*.pem
+
+# Decision traces contain hashed state but are run artifacts, not source
+traces/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Benchmark corpus is cloned, not vendored
+corpus/
