@@ -565,9 +565,12 @@ def jev_route_model(
 
     Fails toward capability: below 75% confidence the strongest ordinary tier
     (Opus) is returned, because a cheap failure costs the cheap attempt plus the
-    expensive retry plus the latency of noticing. Fable is escalation-only — it
-    comes back only when Jev proposes it with confidence, never as the fallback
-    for an uncertain route. `human` means do not delegate.
+    expensive retry plus the latency of noticing. The one exception is a
+    mechanical task (complexity under 0.5), where a cheap-tier proposal is
+    accepted from 50% — a Haiku retry on a one-line edit is nearly free. Fable
+    is escalation-only: it comes back when Jev proposes it with confidence for
+    frontier-complexity architecture or design, never as the fallback for an
+    uncertain route. `human` means do not delegate.
 
     This decides *which* model; whether to delegate at all is a separate
     question answered by compression ratio, not difficulty — a subagent that

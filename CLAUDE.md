@@ -22,10 +22,14 @@ These come from `model_router.py` and `skills/delegation-economics/SKILL.md`.
   work inline instead.
 - Every subagent prompt says what to return: the conclusion, not the evidence.
 - `jev_route_model` already fails toward capability: below 0.75 confidence it returns the
-  strongest ordinary tier (Opus in the default catalog). Do not second-guess it downward.
+  strongest ordinary tier (Opus in the default catalog). The exception is a mechanical task
+  (complexity under 0.5), where a cheap tier is accepted from 0.5 — a Haiku retry on a
+  one-line edit is nearly free. Do not second-guess it downward.
 - **Fable (`claude-fable-5-1`) is the most expensive tier — $10/$50 per MTok, twice Opus.**
   It is escalation-only: never the default for delegated work, never the fallback for an
-  uncertain route, only what the router returns when it judges Opus insufficient.
+  uncertain route. The router returns it when it judges a task frontier complexity —
+  long-horizon architecture, system design, complex multi-page web design — where a wrong
+  structural decision is expensive to unwind.
 - Do not delegate what is already loaded in context. Warm context is nearly free.
 
 ## In Claude Code, hooks enforce this

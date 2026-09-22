@@ -189,7 +189,7 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `control_loop.py` | assemble and gate the execution packet | — |
 | `hooks.py` | Claude Code hook adapters: prompt evaluation, Bash gate, subagent routing | Jev |
 
-`python -m pytest tests/ -q` — 81 tests, 74 of which need no key. Two of them are
+`python -m pytest tests/ -q` — 82 tests, 75 of which need no key. Two of them are
 integration guards: every MCP tool must import from a real module, and every tool
 must be named in a skill. The hook tests run `hooks.py` as a subprocess with no key
 and an absent env file, so they prove the hard block and the fail-silent paths

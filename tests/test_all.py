@@ -396,6 +396,37 @@ def test_route_model_uncertain_route_never_escalates_to_fable(monkeypatch):
     assert model_router.route_model("anything")["selected"] == "haiku"
 
 
+def test_route_model_mechanical_tasks_accept_cheap_tier_at_lower_bar(monkeypatch):
+    """A Haiku retry on a one-line edit is nearly free; do not spend Opus on it."""
+    import model_router
+
+    class Answer:
+        def __init__(self, value, certainty):
+            self.value, self.certainty, self.probabilities = value, certainty, {}
+
+    class Result:
+        def __init__(self, value, certainty, complexity):
+            self.answers = {"model": Answer(value, certainty)}
+            self._c = complexity
+
+        def value(self, _):
+            return self._c
+
+    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: None)
+    route = model_router.route_model
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 0.2))
+    assert route("x")["selected"] == "haiku"           # mechanical: 0.55 is enough
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 1.0))
+    assert route("x")["selected"] == "opus"            # standard: 0.75 still applies
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.4, 0.2))
+    assert route("x")["selected"] == "opus"            # mechanical but a coin flip
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.55, 0.2))
+    assert route("x")["selected"] == "opus"            # the lower bar never reaches Fable
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("human", 0.55, 0.2))
+    assert route("x")["selected"] == "opus"            # nor does it accept 'human' cheaply
+
+
 def test_route_model_is_exposed_remotely():
     """Pure logic, so it belongs on the connector too."""
     import remote_server

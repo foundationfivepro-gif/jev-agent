@@ -27,6 +27,12 @@ from core import Choice, Score, decide, write_trace
 
 MIN_CONFIDENCE = 0.75
 
+# Below this complexity a task is mechanical, and a cheap-tier proposal is
+# accepted at the lower bar: a Haiku retry on a one-line edit costs almost
+# nothing, so failing toward capability there only spends Opus for no reason.
+MECHANICAL_COMPLEXITY = 0.5
+MECHANICAL_CONFIDENCE = 0.5
+
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
 # Fable is the top of the range, not a cheap tier: it costs twice Opus. It is
@@ -46,8 +52,10 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "work where a wrong answer is expensive to detect",
                "cost_in": 5.0, "cost_out": 25.0, "tier": 3},
     "fable":  {"id": "claude-fable-5-1",
-               "fit": "The hardest long-horizon agentic work, only when Opus is "
-                      "genuinely insufficient; never for routine tasks",
+               "fit": "Frontier complexity: long-horizon architecture, system design "
+                      "and complex multi-page web design where a wrong structural "
+                      "decision is expensive to unwind. Never routine tasks, and not "
+                      "for ordinary multi-step work that Opus handles",
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
 
@@ -131,7 +139,17 @@ def route_model(
     # excluded from that fallback — uncertainty is not a reason to pay double.
     ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
     strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
-    selected = str(answer.value) if answer.certainty >= min_confidence else strongest
+    proposed = str(answer.value)
+    complexity = result.value("complexity")
+
+    threshold = min_confidence
+    if (
+        complexity is not None and float(complexity) < MECHANICAL_COMPLEXITY
+        and proposed in ordinary
+    ):
+        threshold = min(min_confidence, MECHANICAL_CONFIDENCE)
+
+    selected = proposed if answer.certainty >= threshold else strongest
     if selected not in eligible and selected != "human":
         selected = strongest
 
@@ -139,7 +157,8 @@ def route_model(
         "selected": selected,
         "proposed": answer.value,
         "confidence": answer.certainty,
-        "complexity": result.value("complexity"),
+        "threshold": threshold,
+        "complexity": complexity,
         "probabilities": answer.probabilities,
         "source": "model",
     }
