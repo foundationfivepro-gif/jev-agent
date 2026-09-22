@@ -43,7 +43,7 @@ runs commands.
 | `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
 | `jev_evaluate` | arbitrary typed decisions |
 | `jev_file_outline` | exported symbols without loading the file; local-only |
-| `jev_route_model` | before spawning a subagent — cheapest Claude model that should pass; `selected` goes straight into the Agent tool's `model`. Fable is the top of the catalog at 2× Opus, never the default |
+| `jev_route_model` | before spawning a subagent — cheapest model that should pass; `selected` goes straight into the subagent's model. Catalog follows the harness (`preset` or `JEV_CATALOG`: claude or codex); the top tier (Fable, Astra) is escalation-only |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
 | `jev_check_action` | before any action with external effect, against plain-English policy |
 
@@ -59,11 +59,18 @@ thinks to. `hooks.py` makes three of them events Claude Code runs on its own:
 | `PreToolUse` on `Agent\|Task` | `route-agent` | `jev_route_model`; sets `model` on a subagent that did not choose one |
 
 `./install.sh hooks` merges them into `~/.claude/settings.json` (user scope, so every
-session), places the defaults policy (`CLAUDE.md`) in `~/.claude/CLAUDE.md` and
-`~/.codex/AGENTS.md`, and registers the server in `~/.codex/config.toml` when Codex is
-present. Codex and Cursor have no equivalent hook surface; there the policy file and the
-skills are the mechanism, and `jev_route_model` is a decision the agent reports rather
-than one the harness applies.
+session) and places the defaults policy (`CLAUDE.md`) in `~/.claude/CLAUDE.md`.
+
+**Codex** speaks the same hook contract — same JSON in and out, exit 2 to block — so the
+installer also writes `prompt` and `gate-bash` into `~/.codex/hooks.json` (shell-string
+commands, `JEV_CATALOG=codex`), appends the policy to `~/.codex/AGENTS.md`, and registers
+the server in `~/.codex/config.toml` with `JEV_CATALOG=codex` so `jev_route_model` answers
+with Codex model ids (`gpt-5.6-luna` 0.2/1.2, `-terra` 2/12, `-sol` 4/20, `gpt-6-astra`
+10/50; Astra is the escalation tier). What Codex does not get is a spawn hook: its docs do
+not name the tool that spawns a subagent, so a matcher would be a guess. There the policy
+tells the agent to call `jev_route_model` and pass `selected` on the spawn, which the docs
+confirm overrides `default_subagent_model`. Cursor has no hook surface at all; the policy
+rule and the skills are the mechanism.
 
 Because a hook runs on every event, it is built around three rules:
 
@@ -189,7 +196,7 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `control_loop.py` | assemble and gate the execution packet | — |
 | `hooks.py` | Claude Code hook adapters: prompt evaluation, Bash gate, subagent routing | Jev |
 
-`python -m pytest tests/ -q` — 82 tests, 75 of which need no key. Two of them are
+`python -m pytest tests/ -q` — 85 tests, 78 of which need no key. Two of them are
 integration guards: every MCP tool must import from a real module, and every tool
 must be named in a skill. The hook tests run `hooks.py` as a subprocess with no key
 and an absent env file, so they prove the hard block and the fail-silent paths
