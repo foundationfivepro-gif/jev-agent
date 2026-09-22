@@ -315,3 +315,45 @@ def test_every_module_has_a_skill_or_is_internal():
     )
     for term in ("should_run", "check_action", "include, index"):
         assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"
+
+
+# ------------------------------------------------- remote connector surface
+
+def test_remote_server_excludes_filesystem_tools():
+    """
+    The context selector must NOT be reachable remotely.
+
+    Its saving comes from reading your actual repository; a remote version would
+    have to upload the codebase to answer the same question, which defeats it.
+    """
+    import remote_server
+    names = {t.name for t in remote_server.mcp._tool_manager.list_tools()}
+    assert "jev_select_context" not in names
+    assert "jev_file_outline" not in names
+    assert names == {"jev_evaluate", "jev_should_run", "jev_check_action",
+                     "jev_gate_command", "jev_classify_paths"}
+
+
+def test_remote_never_accepts_file_content():
+    """
+    A secret scanner you have to upload secrets to is worse than none.
+
+    The remote classifier takes paths only; the content-scanning variant stays
+    local, where it never transmits what it reads.
+    """
+    import inspect, remote_server
+    sig = inspect.signature(remote_server.jev_classify_paths)
+    assert list(sig.parameters) == ["paths"], "remote classifier must not take content"
+    import mcp_server
+    assert "content" in inspect.signature(mcp_server.jev_classify_data).parameters
+
+
+def test_remote_refuses_to_serve_without_a_token():
+    """An open endpoint spending an API quota is someone else's bill."""
+    import remote_server
+    src = inspect_source = open(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "remote_server.py")).read()
+    assert "JEV_REMOTE_TOKEN" in src
+    assert "compare_digest" in src, "token comparison must be constant-time"
+    assert "status_code=503" in src, "must refuse service when no token is configured"

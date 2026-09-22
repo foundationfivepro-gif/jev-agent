@@ -69,6 +69,58 @@ backup is written first, and an unparseable file is refused rather than
 overwritten. Cursor does not expand shell variables in `mcp.json`, so pass
 `--key` or point `env` at an `envFile`.
 
+## Universal reach: local vs remote
+
+Three mechanisms, and only one reaches a phone.
+
+| | skills → your Claude **account** | local MCP | remote MCP connector |
+|---|---|---|---|
+| Claude mobile | **yes** | no | yes |
+| claude.ai web | **yes** | no | yes |
+| Claude desktop / Code | yes | yes | yes |
+| setup | save the skill cards | `./install.sh all` | deploy + Customize → Connectors |
+
+Skills reach every surface but only change how the agent *decides*. The local
+MCP server does the deciding and produces the token saving. The remote connector
+carries a subset of the tools to surfaces where no local process can run.
+
+### What can and cannot go remote
+
+`remote_server.py` exposes five tools. Two are deliberately absent and one is
+deliberately reduced:
+
+| tool | remote | why |
+|---|---|---|
+| `jev_evaluate`, `jev_should_run`, `jev_check_action`, `jev_gate_command` | yes | pure logic, judge what you pass them |
+| `jev_select_context` | **no** | its saving comes from reading *your* repository; a remote version would have to upload the codebase to answer the same question |
+| `jev_file_outline` | **no** | same reason |
+| `jev_classify_data` → `jev_classify_paths` | reduced | the local version scans file **content** and never transmits it. A remote content scanner requires uploading the material it exists to protect — worse than none, because it is trusted. The remote variant takes paths only, and says so in its output |
+
+So the largest token saving is inherently local. That is a property of the
+problem, not a gap.
+
+### Deploying
+
+```bash
+vercel --prod                                    # vercel.json + api/index.py included
+# Vercel → Settings → Environment Variables:
+#   AI_GATEWAY_API_KEY = vck_...
+#   JEV_REMOTE_TOKEN   = a long random string
+```
+
+Then in Claude: **Customize → Connectors → Add custom connector**, URL
+`https://<host>/mcp`, authentication **No sign-in**, and under **Request
+headers** set `authorization` to `Bearer <your JEV_REMOTE_TOKEN>`.
+
+If your organisation lacks the request-headers beta, use the URL form
+`https://<host>/t/<token>/mcp` instead. That puts a credential in a URL, where
+it lands in logs and history — prefer the header, and treat a path token as
+disposable.
+
+`GET /health` is unauthenticated and reports whether the key and token are set.
+**With no `JEV_REMOTE_TOKEN` the server refuses every request** rather than
+serving an open endpoint that spends your Jev quota.
+
 ## One transport, on purpose
 
 A direct `api.typesafe.ai` path was written and removed. With no TypeSafe key to
@@ -104,7 +156,7 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `background_review.py` | which read-only reviewers to run | Jev |
 | `control_loop.py` | assemble and gate the execution packet | — |
 
-`python -m pytest tests/ -q` — 58 tests, 49 of which need no key. Two of them are
+`python -m pytest tests/ -q` — 61 tests, 52 of which need no key. Two of them are
 integration guards: every MCP tool must import from a real module, and every tool
 must be named in a skill. A capability no skill describes is one the agent never
 thinks to call, which is the difference between code being *in* the repo and

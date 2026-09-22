@@ -1,0 +1,9 @@
+# Deployment requirements for the remote MCP server ONLY.
+#
+# Deliberately excludes ast-grep-py and pytest. The remote subset has no
+# filesystem tools, so the parser is dead weight in a serverless bundle —
+# verified by importing remote_server and checking what actually loads.
+typesafe-sdk==0.7.1
+mcp>=1.2
+starlette>=0.37
+uvicorn>=0.30
