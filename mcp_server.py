@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
@@ -42,7 +42,7 @@ from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
 
-mcp = FastMCP(
+mcp = MCPServer(
     "jev",
     instructions=(
         "Decision layer backed by the Jev evaluation model. Call jev_select_context "

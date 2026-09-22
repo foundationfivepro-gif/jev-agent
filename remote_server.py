@@ -60,7 +60,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
+from mcp.server.mcpserver import MCPServer  # noqa: E402
 from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import JSONResponse, PlainTextResponse  # noqa: E402
@@ -72,7 +72,7 @@ from security_router import LABEL_NAMES, classify  # noqa: E402
 
 TOKEN = os.getenv("JEV_REMOTE_TOKEN", "")
 
-mcp = FastMCP(
+mcp = MCPServer(
     "jev-remote",
     instructions=(
         "Jev decision tools that need no access to your filesystem. Use "
@@ -81,8 +81,6 @@ mcp = FastMCP(
         "shell command. For repository context selection, use the LOCAL jev "
         "server — that capability cannot work remotely."
     ),
-    stateless_http=True,   # each request self-contained; required for serverless
-    json_response=True,
 )
 
 
@@ -372,7 +370,7 @@ async def health(_: Request) -> PlainTextResponse:
 
 def build_app():
     """ASGI app: MCP at /mcp, plus an unauthenticated /health."""
-    app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app(stateless_http=True, json_response=True)
     app.router.routes.append(Route("/health", health, methods=["GET"]))
     app.add_middleware(TokenAuth)
     app.add_middleware(PathToken)     # runs first: strips the prefix before auth

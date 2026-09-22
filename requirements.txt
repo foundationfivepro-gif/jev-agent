@@ -1,4 +1,4 @@
 typesafe-sdk==0.7.1      # question types only; the client is unused
 ast-grep-py>=0.39        # TypeScript/JS symbol extraction for the index tier
-mcp[cli]>=1.2            # stdio server for Claude Code and Codex
+mcp[cli]>=2.0            # stdio server for Claude Code and Codex
 pytest>=8.0
