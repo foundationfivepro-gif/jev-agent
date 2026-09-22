@@ -7,13 +7,14 @@ Customize -> Connectors -> Add custom connector, pointing at `https://<host>/mcp
 
 WHAT IS AND IS NOT HERE, AND WHY
 
-Five tools are stateless — they judge what you pass them — so they work fine from
+Six tools are stateless — they judge what you pass them — so they work fine from
 a server that has never seen your disk:
 
     jev_evaluate        arbitrary typed decisions
     jev_should_run      should a scheduled automation execute this time
     jev_check_action    does a proposed action satisfy policy
     jev_gate_command    is this shell command safe to run
+    jev_route_model     cheapest Claude model that should pass a task
     jev_classify_paths  sensitivity from FILE PATHS ONLY
 
 Two tools are deliberately absent:
@@ -43,7 +44,7 @@ without it. Two ways to present it:
 
 The path form puts a credential in a URL, which ends up in logs and history.
 Prefer the header. If you use the path form, treat the token as disposable and
-rotate it freely — it grants only these five tools.
+rotate it freely — it grants only these six tools.
 
 Run locally:   JEV_REMOTE_TOKEN=x AI_GATEWAY_API_KEY=... python remote_server.py
 Deploy:        see vercel.json and api/index.py
@@ -67,6 +68,7 @@ from starlette.responses import JSONResponse, PlainTextResponse  # noqa: E402
 from starlette.routing import Route  # noqa: E402
 
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
+from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 
@@ -121,6 +123,17 @@ class CommandDecision(BaseModel):
     reason: str
     binaries: list[str]
     source: Literal["policy", "model"]
+
+
+class ModelRouteDecision(BaseModel):
+    selected: str = Field(description="haiku, sonnet, opus, fable — or 'human' (do not delegate).")
+    model_id: str | None
+    proposed: str | None
+    confidence: float
+    complexity: float | None = Field(description="0=mechanical, 1=standard, 2=multi-step, 3=frontier.")
+    probabilities: dict[str, float]
+    source: Literal["policy", "model"]
+    cost_per_mtok: dict[str, float]
 
 
 class PathClassification(BaseModel):
@@ -283,6 +296,45 @@ def jev_gate_command(
                                binaries=extract_commands(command), source="policy")
     return CommandDecision(decision=d["final"], reason=d.get("reason", ""),
                            binaries=d.get("binaries", []), source=d.get("source", "model"))
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True})
+def jev_route_model(
+    task: Annotated[str, Field(description=(
+        "The complete subtask to delegate, in one or two sentences, including what must come back."
+    ))],
+    max_cost_in: Annotated[float, Field(default=1e9, description=(
+        "Exclude models whose input price per million tokens exceeds this."
+    ))] = 1e9,
+) -> ModelRouteDecision:
+    """
+    Pick the cheapest Claude model that should pass a task.
+
+    Catalog, USD per million tokens: haiku 1/5, sonnet 2/10, opus 5/25,
+    fable 10/50. Fails toward capability — below 75% confidence Opus is
+    returned, except on mechanical tasks (complexity under 0.5) where a cheap
+    tier is accepted from 50% — and Fable is escalation-only: it comes back
+    when Jev proposes it with confidence for frontier-complexity architecture
+    or design, never as the fallback for an uncertain route. `human` means do
+    not delegate.
+    """
+    _require_key()
+    if not task.strip():
+        raise ValueError("task is empty")
+    try:
+        d = route_model(task, max_cost_in=max_cost_in)
+    except TransportError as exc:
+        raise ValueError(f"Jev unreachable: {exc}") from exc
+    chosen = DEFAULT_CATALOG.get(d["selected"], {})
+    return ModelRouteDecision(
+        selected=d["selected"], model_id=chosen.get("id"),
+        proposed=None if d.get("proposed") is None else str(d["proposed"]),
+        confidence=round(float(d.get("confidence", 0.0)), 3),
+        complexity=None if d.get("complexity") is None else round(float(d["complexity"]), 2),
+        probabilities={k: round(float(v), 3) for k, v in (d.get("probabilities") or {}).items()},
+        source=d.get("source", "model"),
+        cost_per_mtok={"in": chosen.get("cost_in", 0.0), "out": chosen.get("cost_out", 0.0)},
+    )
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,

@@ -94,6 +94,22 @@ def install_rules(repo: Path, *, dry_run: bool) -> list[Path]:
             continue
         target.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
+
+    # The defaults policy is the one rule that must always apply: it says which
+    # jev tool to call before reading, running, sending or delegating.
+    policy = HERE / "CLAUDE.md"
+    if policy.is_file():
+        dest = target / "jev-defaults.mdc"
+        written.append(dest)
+        if not dry_run:
+            target.mkdir(parents=True, exist_ok=True)
+            dest.write_text(
+                "---\n"
+                'description: "jev-agent defaults: which jev tool to call before reading, '
+                'running, sending or delegating"\n'
+                "alwaysApply: true\n---\n\n" + policy.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
     return written
 
 

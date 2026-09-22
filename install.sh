@@ -13,11 +13,18 @@
 #               that produces the token saving, because jev_select_context runs
 #               before the agent reads files.
 #
+#   hooks       Claude Code hooks (hooks.py) so the gate, the model router and
+#               a per-prompt evaluation run on every event without the agent
+#               having to remember. Also places the defaults policy (CLAUDE.md)
+#               in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md, and registers
+#               the server in ~/.codex/config.toml when Codex is present.
+#
 # Usage:
 #   ./install.sh skills           # skills -> Claude Code + Codex
+#   ./install.sh hooks            # Claude Code hooks + global policy + Codex registration
 #   ./install.sh mcp              # print MCP registration for Claude Code + Codex
 #   ./install.sh cursor REPO      # Cursor: convert skills to .mdc + merge mcp.json
-#   ./install.sh all              # skills + mcp (Cursor is separate; see above)
+#   ./install.sh all              # skills + hooks + mcp (Cursor is separate; see above)
 #
 # Cursor is handled by install_cursor.py because it differs twice: it does not
 # read SKILL.md (its rules are .cursor/rules/*.mdc), and those rules are
@@ -94,7 +101,12 @@ case "$MODE" in
     exec python3 "$HERE/install_cursor.py" --repo "$repo"
     ;;
   skills) echo "Installing skills..."; install_skills ;;
+  hooks)  echo "Installing hooks..."; python3 "$HERE/hooks.py" install ;;
   mcp)    echo "MCP registration:"; echo; print_mcp ;;
-  all)    echo "Installing skills..."; install_skills; echo; echo "MCP registration:"; echo; print_mcp ;;
-  *) echo "usage: $0 [skills|mcp|cursor REPO|all]" >&2; exit 1 ;;
+  all)
+    echo "Installing skills..."; install_skills; echo
+    echo "Installing hooks..."; python3 "$HERE/hooks.py" install; echo
+    echo "MCP registration:"; echo; print_mcp
+    ;;
+  *) echo "usage: $0 [skills|hooks|mcp|cursor REPO|all]" >&2; exit 1 ;;
 esac
