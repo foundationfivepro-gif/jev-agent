@@ -65,42 +65,6 @@ DEFAULT_CATALOG: dict[str, dict] = {
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
 
-# OpenAI Codex, same shape. Keys are model ids as Codex's spawn accepts them.
-# Astra is the escalation tier: fifty times Luna's output price.
-CODEX_CATALOG: dict[str, dict] = {
-    "gpt-5.6-luna":  {"id": "gpt-5.6-luna",
-                      "fit": "Classification, formatting, simple mechanical edits, "
-                             "search-and-report subtasks that return a short answer",
-                      "cost_in": 0.20, "cost_out": 1.20, "tier": 1},
-    "gpt-5.6-terra": {"id": "gpt-5.6-terra",
-                      "fit": "Normal coding, research, multi-file edits, "
-                             "most day-to-day engineering",
-                      "cost_in": 2.0, "cost_out": 12.0, "tier": 2},
-    "gpt-5.6-sol":   {"id": "gpt-5.6-sol",
-                      "fit": "Complex architecture, hard debugging, subtle refactors, "
-                             "work where a wrong answer is expensive to detect",
-                      "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
-    "gpt-6-astra":   {"id": "gpt-6-astra",
-                      "fit": "Frontier complexity: long-horizon architecture, system design "
-                             "and complex multi-page web design where a wrong structural "
-                             "decision is expensive to unwind. Never routine tasks, and not "
-                             "for ordinary multi-step work that Sol handles",
-                      "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
-}
-
-CATALOGS: dict[str, dict[str, dict]] = {"claude": DEFAULT_CATALOG, "codex": CODEX_CATALOG}
-
-
-def catalog_for(name: str | None = None) -> dict[str, dict]:
-    """The catalog for a harness: explicit name, else $JEV_CATALOG, else Claude."""
-    import os
-
-    key = (name or os.environ.get("JEV_CATALOG") or "claude").lower()
-    if key not in CATALOGS:
-        raise ValueError(f"unknown catalog {key!r}; use one of {sorted(CATALOGS)}")
-    return CATALOGS[key]
-
-
 def estimate_costs(
     catalog: Mapping[str, Mapping], *, context_mtok: float, output_mtok: float, tool_mtok: float
 ) -> dict:

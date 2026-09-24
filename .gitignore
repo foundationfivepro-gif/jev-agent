@@ -3,7 +3,6 @@
 .env.*
 *.key
 *.pem
-.codex/
 
 # Vercel project link is per-machine
 .vercel/

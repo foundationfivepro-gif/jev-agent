@@ -71,8 +71,6 @@ The catalog, USD per million tokens, first-party rates:
 escalation-only: the router returns it when Jev proposes it with confidence, never as the
 fallback for an uncertain route and never as a default for routine subtasks.
 
-In Codex the same tool answers from the Codex catalog (`preset="codex"`, or
-`JEV_CATALOG=codex` on the server): `gpt-5.6-luna` 0.2/1.2, `gpt-5.6-terra` 2/12,
-`gpt-5.6-sol` 4/20, `gpt-6-astra` 10/50 — Astra is the escalation tier, fifty times Luna.
-Codex has no spawn hook, so call it yourself and pass `selected` as the spawn's model; an
-explicit spawn model overrides `default_subagent_model`.
+In Claude Code the Agent hook does this on every spawn that sets no `model`, and appends a
+return contract to the prompt, so the parent reads a conclusion instead of a transcript.
+Call `jev_route_model` yourself only where no hook runs.
