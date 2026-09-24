@@ -1,0 +1,23 @@
+# Only remote_server.py and what it imports belong in the function bundle.
+.env
+.env.*
+*.key
+*.pem
+traces/
+tests/
+skills/
+corpus/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+.codex/
+.claude/
+.cursor/
+.vercel/
+*.bak-*
+bench.py
+install.sh
+install_cursor.py
+hooks.py
