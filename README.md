@@ -41,6 +41,7 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 
 | event | hook | what runs |
 |---|---|---|
+| `SessionStart` | `session` | one line, `jev hooks active: ...`, telling the policy that gating and routing are enforced here; local, no call |
 | `UserPromptSubmit` | `prompt` | one Jev call per prompt; a one-line note only when repository context is needed |
 | `PreToolUse` on `Bash` | `gate-bash` | `jev_gate_command`; a hard block is deterministic and needs no key |
 | `PreToolUse` on `Agent\|Task` | `route-agent` | appends the return contract (local, no key); sets `model` via `jev_route_model` when none was chosen |
@@ -75,6 +76,26 @@ Because a hook runs on every event, it is built around three rules:
 - **Prompt text and command lines leave the machine** — that is what a judgement
   costs. Anything credential-shaped is classified locally, held back, and turned into
   `ask` without being sent.
+
+### Cowork, claude.ai and other sessions without the hooks
+
+The policy keys off the `jev hooks active` line, not off where it is installed. With the
+line, Claude leaves gating and routing to the hooks; without it, Claude calls
+`jev_gate_command` and `jev_route_model` itself. So one conditional rule covers every
+surface: a hooked Claude Code session never pays twice, and an unhooked one never goes
+ungated.
+
+To carry that rule to surfaces that do not read `~/.claude/CLAUDE.md`, put the same
+condition in your claude.ai personal preferences (Settings → Profile):
+
+> Before any action with external effect (sending, posting, deleting, paying, deploying),
+> call jev_check_action. Before sending file contents to an outside service, call
+> jev_classify_data; secret means stop. Before reading files to find something, call
+> jev_select_context. Unless the session context says "jev hooks active": call
+> jev_gate_command before shell commands (never run review or block), and
+> jev_route_model before delegating (use the model it selects).
+
+There the tools come from the remote connector (`remote_server.py`, below).
 
 ### MCP tools
 

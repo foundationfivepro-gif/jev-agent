@@ -9,6 +9,10 @@ applies to every prompt and every command in every session, not only inside
 repositories whose CLAUDE.md says so.
 
     event                     subcommand    what it does
+    SessionStart              session       announces HOOKS_ACTIVE, so the policy (and
+                                            any account-wide preference) can tell a
+                                            hooked session from one with no hooks,
+                                            such as Cowork. Local; no call.
     UserPromptSubmit          prompt        one Jev call per prompt; a one-line note
                                             only when repository context is needed
     PreToolUse   Bash         gate-bash     jev_gate_command as a hook. The hard
@@ -70,6 +74,12 @@ MARK_END = "<!-- jev-agent:end -->"
 MAX_TASK_CHARS = 4000
 HOOK_BUDGET_S = 20          # below Claude Code's 30s hook timeout, with margin
 COMPLEXITY = ("mechanical", "standard", "multi-step", "frontier")
+
+# The one signal that gating and routing are enforced here. Rules that apply on
+# every surface (a claude.ai preference also reaches Cowork) key off this line
+# instead of assuming hooks exist, so a hooked session never pays twice and an
+# unhooked one never goes ungated.
+HOOKS_ACTIVE = "jev hooks active"
 
 # Appended to every subagent prompt. The marker makes it idempotent.
 RETURN_MARK = "[jev return contract]"
@@ -338,6 +348,13 @@ def report(trace_dir: Path | None = None) -> dict:
     }
 
 
+def session(data: dict) -> None:
+    """SessionStart (startup, resume, clear, compact): say, in one line, what the hooks enforce."""
+    routing = "subagents routed" if _have_key() else "routing off (no key)"
+    note = f"{HOOKS_ACTIVE}: Bash gated, {routing}, subagent return contract on."
+    _emit({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": note}})
+
+
 def prompt(data: dict) -> None:
     text = data.get("prompt")
     if not isinstance(text, str):
@@ -432,6 +449,7 @@ def install(args: argparse.Namespace) -> None:
                 "timeout": 30, "statusMessage": msg}
 
     ours = {
+        "SessionStart": [{"hooks": [entry("session", "jev: hooks active")]}],
         "UserPromptSubmit": [{"hooks": [entry("prompt", "jev: evaluating prompt")]}],
         "PreToolUse": [
             {"matcher": "Bash", "hooks": [entry("gate-bash", "jev: gating command")]},
@@ -459,7 +477,7 @@ def install(args: argparse.Namespace) -> None:
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     print(f"hooks    — {verb} {settings}" + (f"  (backup {backup.name})" if backup else ""))
-    print("             UserPromptSubmit -> prompt, PreToolUse Bash -> gate-bash, "
+    print("             SessionStart -> session, UserPromptSubmit -> prompt, PreToolUse Bash -> gate-bash, "
           "PreToolUse Agent|Task -> route-agent, PostToolUse(Failure) Agent|Task -> agent-outcome")
 
     # Policy block: Claude Code global memory. Installed with the hooks because
@@ -482,9 +500,10 @@ def install(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------- main
 
 HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent,
-            "agent-outcome": agent_outcome}
+            "agent-outcome": agent_outcome, "session": session}
 FALLBACK = {
     "agent-outcome": None,
+    "session": None,
     "gate-bash": _pre_tool("ask", f"jev: no answer within {HOOK_BUDGET_S}s; that is not permission to proceed"),
     "route-agent": None,
     "prompt": None,

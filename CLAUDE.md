@@ -1,8 +1,9 @@
 # jev-agent defaults
 
-This policy is installed together with hooks that already run Jev on every prompt, every
-Bash command and every subagent spawn. Do not repeat those calls by hand: each one is a
-tool round-trip in your context plus a second Jev call for the same decision.
+When the hooks are running, a session-start note says `jev hooks active`. They then run
+Jev on every Bash command and every subagent spawn; do not repeat those calls by hand,
+since each is a tool round-trip in your context plus a second Jev call. With no such note
+(Cowork, claude.ai, a machine without the hooks), make those calls yourself.
 
 ## Call these yourself
 
@@ -12,13 +13,18 @@ tool round-trip in your context plus a second Jev call for the same decision.
 - **Before an action with external effect** (send, post, delete, pay, deploy):
   `jev_check_action`.
 
-## Hooks do these; don't
+## With `jev hooks active`, the hooks do these
 
 - **Bash** is gated by `jev_gate_command`. The hook's `deny` or `ask` is the decision.
 - **Agent spawns** without a `model` are routed by `jev_route_model`, and every subagent
   prompt gets a return contract (conclusion only, file:line references). Set `model`
   yourself only when you know better; the hook keeps it.
-- Call either tool directly only where no hook runs (the claude.ai remote connector).
+
+## Without it, do them yourself
+
+- Before a shell command: `jev_gate_command`. Never run `review` or `block`.
+- Before delegating: `jev_route_model`; use `selected` as the model (`human`: don't
+  delegate), and end the subagent prompt by asking for the conclusion only.
 
 ## Delegating
 

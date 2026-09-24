@@ -553,6 +553,19 @@ def test_hook_route_agent_respects_explicit_model(tmp_path):
     assert updated["model"] == "opus"
 
 
+def test_session_hook_announces_the_exact_signal_the_policy_keys_off(tmp_path):
+    """One rule serves hooked and unhooked surfaces only if the signal and the policy agree."""
+    import hooks
+    r = _hook("session", {"hook_event_name": "SessionStart", "source": "startup"}, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["hookEventName"] == "SessionStart"
+    assert out["additionalContext"].startswith(hooks.HOOKS_ACTIVE)
+    assert "routing off" in out["additionalContext"]          # no key in this test
+    policy = open(os.path.join(ROOT, "CLAUDE.md")).read()
+    assert f"`{hooks.HOOKS_ACTIVE}`" in policy
+
+
 def test_hook_route_agent_adds_return_contract_once_without_a_key(tmp_path):
     """The parent pays for every word a subagent returns; the contract costs no call."""
     import hooks
@@ -598,6 +611,8 @@ def test_hooks_install_merges_and_is_idempotent(tmp_path):
     ours = [h for g in s["hooks"]["PreToolUse"] for h in g["hooks"] if "hooks.py" in " ".join(h.get("args", []))]
     assert sorted(h["args"][-1] for h in ours) == ["gate-bash", "route-agent"]
     assert len(s["hooks"]["UserPromptSubmit"]) == 1
+    [start] = s["hooks"]["SessionStart"]
+    assert start["hooks"][0]["args"][-1] == "session"
     for event in ("PostToolUse", "PostToolUseFailure"):
         [group] = s["hooks"][event]
         assert group["matcher"] == "Agent|Task" and group["hooks"][0]["args"][-1] == "agent-outcome"
