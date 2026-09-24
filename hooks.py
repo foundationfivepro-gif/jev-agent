@@ -16,6 +16,11 @@ repositories whose CLAUDE.md says so.
                                             block is deterministic and needs no key.
     PreToolUse   Agent|Task   route-agent   jev_route_model as a hook. Sets `model`
                                             on a subagent that did not choose one.
+    PostToolUse(Failure)      agent-outcome records how that subagent ended, keyed by
+                 Agent|Task                 tool_use_id, so a route can be judged by
+                                            what it produced. Local; no key, no call.
+
+    python3 hooks.py report               # routes, fallbacks and outcomes so far
 
 Each subcommand reads Claude Code's hook JSON on stdin and writes hook JSON on
 stdout. Silence means "no opinion" and the ordinary permission flow continues.
@@ -204,14 +209,20 @@ def route_agent(data: dict) -> None:
     if not task or _looks_secret(task) or not _have_key():
         return
 
-    from core import TransportError
+    from core import InvalidResponse, TransportError, write_trace
     from model_router import catalog_for, route_model
 
     cat = catalog_for()
+    meta = _join_keys(data)
     try:
-        d = route_model(task[:MAX_TASK_CHARS], catalog=cat)
+        d = route_model(task[:MAX_TASK_CHARS], catalog=cat, trace_meta=meta)
     except TransportError as exc:
-        print(f"jev route-agent: unreachable ({exc}); leaving model unset", file=sys.stderr)
+        # Recorded, so an outage or a malformed answer shows up in `report`
+        # instead of looking like a subagent that simply was not routed.
+        reason = "invalid_response" if isinstance(exc, InvalidResponse) else "transport_error"
+        write_trace("model_router", {"task": task[:MAX_TASK_CHARS]},
+                    {"selected": None, "fallback": reason, "error": str(exc)[:300]}, meta=meta)
+        print(f"jev route-agent: {reason} ({exc}); leaving model unset", file=sys.stderr)
         return
 
     selected = d["selected"]
@@ -229,6 +240,78 @@ def route_agent(data: dict) -> None:
     _emit(_pre_tool("allow", reason, {**tool_input, "model": selected}))
 
 
+def _join_keys(data: dict) -> dict:
+    return {k: str(data[k]) for k in ("tool_use_id", "session_id") if data.get(k)}
+
+
+def agent_outcome(data: dict) -> None:
+    """
+    Record how a subagent ended. Runs on PostToolUse and PostToolUseFailure.
+
+    This is the half a routing decision cannot supply for itself: whether the
+    model it chose came back with a result or an error. Only shape is stored —
+    status, length, the model that ran — never the subagent's output, which is
+    as sensitive as anything it read. Says nothing to Claude Code.
+    """
+    meta = _join_keys(data)
+    if not meta.get("tool_use_id"):
+        return
+    from core import write_trace
+
+    tool_input = data.get("tool_input") or {}
+    response = data.get("tool_response")
+    failed = data.get("hook_event_name") == "PostToolUseFailure" or bool(data.get("error"))
+    if isinstance(response, dict) and response.get("is_error"):
+        failed = True
+    text = response if isinstance(response, str) else json.dumps(response, default=str) if response else ""
+    write_trace("model_router_outcome", meta, None, {
+        "status": "error" if failed else "ok",
+        "model": tool_input.get("model"),
+        "response_chars": len(text),
+    }, meta=meta)
+
+
+def report(trace_dir: Path | None = None) -> dict:
+    """Join routing decisions to subagent outcomes. Read-only; prints nothing itself."""
+    from collections import Counter
+
+    root = Path(trace_dir or os.environ["JEV_TRACE_DIR"])
+    routes: dict[str, dict] = {}
+    outcomes: dict[str, dict] = {}
+    unjoined = 0
+    for path in sorted(root.glob("model_router*.json")) if root.is_dir() else []:
+        try:
+            t = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        key = (t.get("meta") or {}).get("tool_use_id")
+        if t.get("system") == "model_router_outcome":
+            if key:
+                outcomes[key] = t.get("result") or {}
+        elif key:
+            routes[key] = t.get("decision") or {}
+        else:
+            unjoined += 1
+
+    by_model: dict[str, Counter] = {}
+    fallbacks: Counter = Counter()
+    for key, d in routes.items():
+        fallbacks[d.get("fallback") or "accepted"] += 1
+        model = str(d.get("selected"))
+        status = (outcomes.get(key) or {}).get("status", "no_outcome")
+        by_model.setdefault(model, Counter())[status] += 1
+    explicit = sum(1 for k in outcomes if k not in routes)
+    latencies = sorted(d["latency_ms"] for d in routes.values() if d.get("latency_ms") is not None)
+    return {
+        "routed": len(routes),
+        "fallbacks": dict(fallbacks),
+        "outcomes_by_selected_model": {m: dict(c) for m, c in sorted(by_model.items())},
+        "subagents_not_routed_by_jev": explicit,
+        "decisions_without_tool_use_id": unjoined,
+        "median_latency_ms": latencies[len(latencies) // 2] if latencies else None,
+    }
+
+
 def prompt(data: dict) -> None:
     text = data.get("prompt")
     if not isinstance(text, str):
@@ -237,12 +320,12 @@ def prompt(data: dict) -> None:
     if len(text) < 20 or _looks_secret(text) or not _have_key():
         return
 
-    from core import Noul, Score, TransportError, decide
+    from core import UNTRUSTED, Noul, Score, TransportError, decide
 
     try:
         r = decide({"prompt": text[:MAX_TASK_CHARS]}, {
             "complexity": Score(
-                instructions="Complexity of completing state.prompt as a coding task",
+                instructions="Complexity of completing state.prompt as a coding task" + UNTRUSTED,
                 criteria=list(COMPLEXITY),
             ),
             "repo": Noul(
@@ -347,6 +430,12 @@ def install(args: argparse.Namespace) -> None:
             {"matcher": "Bash", "hooks": [entry("gate-bash", "jev: gating command")]},
             {"matcher": "Agent|Task", "hooks": [entry("route-agent", "jev: routing subagent")]},
         ],
+        "PostToolUse": [
+            {"matcher": "Agent|Task", "hooks": [entry("agent-outcome", "jev: recording outcome")]},
+        ],
+        "PostToolUseFailure": [
+            {"matcher": "Agent|Task", "hooks": [entry("agent-outcome", "jev: recording outcome")]},
+        ],
     }
 
     # Claude Code: hooks (user scope = every session on this machine).
@@ -446,8 +535,10 @@ def install(args: argparse.Namespace) -> None:
 
 # ---------------------------------------------------------------------- main
 
-HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent}
+HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent,
+            "agent-outcome": agent_outcome}
 FALLBACK = {
+    "agent-outcome": None,
     "gate-bash": _pre_tool("ask", f"jev: no answer within {HOOK_BUDGET_S}s; that is not permission to proceed"),
     "route-agent": None,
     "prompt": None,
@@ -462,6 +553,8 @@ def main(argv: list[str] | None = None) -> None:
     ins = sub.add_parser("install")
     ins.add_argument("--home", default="~", help="Home directory to install into (tests).")
     ins.add_argument("--dry-run", action="store_true")
+    rep = sub.add_parser("report")
+    rep.add_argument("--dir", default=None, help="Trace directory (default: $JEV_TRACE_DIR).")
 
     # argparse exits 2 on a usage error, and 2 is Claude Code's blocking code.
     try:
@@ -473,6 +566,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "install":
         install(args)
+        return
+    if args.cmd == "report":
+        print(json.dumps(report(Path(args.dir) if args.dir else None), indent=2))
         return
 
     _arm_budget(FALLBACK[args.cmd])

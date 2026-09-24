@@ -588,6 +588,9 @@ def test_hooks_install_merges_and_is_idempotent(tmp_path):
     ours = [h for g in s["hooks"]["PreToolUse"] for h in g["hooks"] if "hooks.py" in " ".join(h.get("args", []))]
     assert sorted(h["args"][-1] for h in ours) == ["gate-bash", "route-agent"]
     assert len(s["hooks"]["UserPromptSubmit"]) == 1
+    for event in ("PostToolUse", "PostToolUseFailure"):
+        [group] = s["hooks"][event]
+        assert group["matcher"] == "Agent|Task" and group["hooks"][0]["args"][-1] == "agent-outcome"
 
     md = (tmp_path / ".claude" / "CLAUDE.md").read_text()
     assert md.startswith("# mine") and md.count("jev-agent:begin") == 1
@@ -659,3 +662,138 @@ def test_codex_install_writes_hooks_and_catalog_env(tmp_path):
     ours = [x for x in bash if "hooks.py" in x["command"]]
     assert len(ours) == 1 and ours[0]["command"].startswith("JEV_CATALOG=codex ") and "args" not in ours[0]
     assert len(h["hooks"]["UserPromptSubmit"]) == 1
+
+
+# ------------------------------------------------------- response validation
+
+def _gateway_reply(monkeypatch, body):
+    import io
+    import core
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
+    monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout: Resp(json.dumps(body).encode()))
+
+
+def _route_questions():
+    from core import Choice, Noul
+    return {
+        "pick": Choice(instructions="x", criteria={"a": "first", "b": "second"}),
+        "ok": Noul(instructions="y"),
+    }
+
+
+def _answers(choice="a", probs=None, noul=0.8):
+    return {"answers": {
+        "pick": {"type": "choice", "choice": choice, "confidence": 0.9,
+                 "probabilities": probs if probs is not None else {"a": 0.9, "b": 0.1}},
+        "ok": {"type": "boolean", "probability": noul},
+    }, "usage": {"inputTokens": 10, "outputTokens": 2}}
+
+
+def test_well_formed_answer_passes_and_reports_latency(monkeypatch):
+    import core
+    _gateway_reply(monkeypatch, _answers())
+    d = core.decide({"t": 1}, _route_questions())
+    assert d["pick"] == "a" and d.latency_ms is not None and d.input_tokens == 10
+
+
+@pytest.mark.parametrize("body,why", [
+    (_answers(choice="c", probs={"a": 0.5, "b": 0.5}), "not offered"),
+    (_answers(probs={"a": 0.9, "b": 0.4}), "sum to"),
+    (_answers(choice="b"), "not the most probable"),
+    (_answers(probs={"a": 0.9, "zzz": 0.1}), "not offered"),
+    (_answers(noul=1.7), "outside 0..1"),
+    ({"answers": {"pick": _answers()["answers"]["pick"]}}, "not answered"),
+    ({"answers": {"pick": {**_answers()["answers"]["pick"], "type": "score"},
+                  "ok": _answers()["answers"]["ok"]}}, "asked choice"),
+    ({"error": "nope"}, "no answers"),
+])
+def test_malformed_answer_is_refused_not_trusted(monkeypatch, body, why):
+    """A confident wrong route starts as an answer nobody checked."""
+    import core
+    _gateway_reply(monkeypatch, body)
+    with pytest.raises(core.InvalidResponse, match=why):
+        core.decide({"t": 1}, _route_questions())
+
+
+def test_invalid_response_is_a_transport_error_so_every_caller_fails_safe():
+    import core
+    assert issubclass(core.InvalidResponse, core.TransportError)
+
+
+def test_questions_over_untrusted_text_say_so():
+    import inspect
+    import hooks
+    import model_router
+    import permission_gate
+    for mod in (hooks, model_router, permission_gate):
+        assert "UNTRUSTED" in inspect.getsource(mod), mod.__name__
+
+
+# ------------------------------------------------------------ outcome loop
+
+def test_route_model_names_its_fallback_and_carries_join_keys(monkeypatch):
+    import model_router
+
+    class Answer:
+        def __init__(self, value, certainty):
+            self.value, self.certainty, self.probabilities = value, certainty, {}
+
+    class Result:
+        latency_ms, input_tokens, output_tokens = 120, 300, 20
+
+        def __init__(self, value, certainty):
+            self.answers = {"model": Answer(value, certainty)}
+
+        def value(self, _):
+            return 2.0
+
+    seen = {}
+    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: seen.update(k))
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.9))
+    d = model_router.route_model("x", trace_meta={"tool_use_id": "toolu_1"})
+    assert d["fallback"] is None and d["latency_ms"] == 120
+    assert seen["meta"] == {"tool_use_id": "toolu_1"}
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.3))
+    assert model_router.route_model("x")["fallback"] == "low_confidence"
+
+
+def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch):
+    import core
+    import hooks
+
+    monkeypatch.setattr(core, "TRACE_DIR", tmp_path)
+    core.write_trace("model_router", {"task": "a"}, {"selected": "haiku", "fallback": None,
+                     "latency_ms": 90}, meta={"tool_use_id": "t1"})
+    core.write_trace("model_router", {"task": "b"}, {"selected": "opus", "fallback": "low_confidence",
+                     "latency_ms": 110}, meta={"tool_use_id": "t2"})
+
+    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env.update(JEV_ENV_FILE=str(tmp_path / "absent.env"), JEV_TRACE_DIR=str(tmp_path))
+    run = lambda payload: subprocess.run(
+        [_sys.executable, os.path.join(ROOT, "hooks.py"), "agent-outcome"],
+        input=json.dumps(payload), capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
+    ok = run({"hook_event_name": "PostToolUse", "tool_use_id": "t1",
+              "tool_input": {"model": "haiku"}, "tool_response": {"content": "done"}})
+    bad = run({"hook_event_name": "PostToolUseFailure", "tool_use_id": "t2",
+               "tool_input": {"model": "opus"}, "error": "subagent crashed"})
+    extra = run({"hook_event_name": "PostToolUse", "tool_use_id": "t3",
+                 "tool_input": {"model": "sonnet"}, "tool_response": "secret output text"})
+    for r in (ok, bad, extra):
+        assert r.returncode == 0 and r.stdout == "", r.stderr
+
+    rep = hooks.report(tmp_path)
+    assert rep["routed"] == 2
+    assert rep["fallbacks"] == {"accepted": 1, "low_confidence": 1}
+    assert rep["outcomes_by_selected_model"] == {"haiku": {"ok": 1}, "opus": {"error": 1}}
+    assert rep["subagents_not_routed_by_jev"] == 1
+    # Shape only: a subagent's output never lands in a trace.
+    assert not any("secret output" in f.read_text() for f in tmp_path.iterdir())

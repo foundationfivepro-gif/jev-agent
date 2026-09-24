@@ -50,13 +50,25 @@ runs commands.
 `./install.sh mcp` prints the exact registration for Claude Code and Codex.
 
 **Hooks (Claude Code only).** The tools are advisory — the agent calls them when it
-thinks to. `hooks.py` makes three of them events Claude Code runs on its own:
+thinks to. `hooks.py` makes three of them events Claude Code runs on its own, and closes the loop on routing:
 
 | event | hook | what runs |
 |---|---|---|
 | `UserPromptSubmit` | `prompt` | one Jev call per prompt: complexity and whether repository context is needed, injected as a one-line note |
 | `PreToolUse` on `Bash` | `gate-bash` | `jev_gate_command`; a hard block is deterministic and needs no key |
 | `PreToolUse` on `Agent\|Task` | `route-agent` | `jev_route_model`; sets `model` on a subagent that did not choose one |
+| `PostToolUse` / `PostToolUseFailure` on `Agent\|Task` | `agent-outcome` | records whether the routed subagent returned or failed, keyed by `tool_use_id`; local, no call |
+
+`python3 hooks.py report` joins each routing decision to its outcome: fallback reasons
+(`low_confidence`, `invalid_response`, `transport_error`, ...), ok/error counts per
+selected model, and median Jev latency. Traces store shapes and hashes, never subagent
+output.
+
+Every Jev answer is checked before it is used: the choice must be one that was offered
+and the most probable one, and probabilities must lie in 0..1 and sum to 1. A malformed
+answer is an `InvalidResponse` (a `TransportError`), so every caller treats it as no
+decision. Questions over prompts, commands and subagent tasks tell Jev that text is
+untrusted data, not instructions.
 
 `./install.sh hooks` merges them into `~/.claude/settings.json` (user scope, so every
 session) and places the defaults policy (`CLAUDE.md`) in `~/.claude/CLAUDE.md`.

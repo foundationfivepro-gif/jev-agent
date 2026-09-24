@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
-from core import Choice, Score, decide, write_trace
+from core import UNTRUSTED, Choice, Score, decide, write_trace
 
 MIN_CONFIDENCE = 0.75
 
@@ -154,15 +154,23 @@ def route_model(
     needs_browser: bool = False,
     max_cost_in: float = 1e9,
     min_confidence: float = MIN_CONFIDENCE,
+    trace_meta: Mapping[str, str] | None = None,
 ) -> dict:
-    """Choose the cheapest eligible executor that should succeed."""
+    """
+    Choose the cheapest eligible executor that should succeed.
+
+    `fallback` in the result says why `selected` differs from `proposed`, or is
+    None when Jev's proposal was taken. `trace_meta` is stored with the trace
+    (hooks pass `tool_use_id`) so the subagent's outcome can be joined to it.
+    """
     eligible = {
         k: v for k, v in catalog.items()
         if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
     }
     if not eligible:
-        decision = {"selected": "human", "reason": "no eligible model", "source": "policy"}
-        write_trace("model_router", {"task": task}, decision)
+        decision = {"selected": "human", "reason": "no eligible model", "source": "policy",
+                    "fallback": "no_eligible_model"}
+        write_trace("model_router", {"task": task}, decision, meta=trace_meta)
         return decision
 
     criteria = {k: v["fit"] for k, v in eligible.items()}
@@ -175,7 +183,7 @@ def route_model(
         "objective": "lowest total cost that still passes acceptance",
     }
     result = decide(state, {
-        "model": Choice(instructions="Which eligible model is the cheapest sufficient route?",
+        "model": Choice(instructions="Which eligible model is the cheapest sufficient route?" + UNTRUSTED,
                         criteria=criteria),
         "complexity": Score(instructions="Complexity of the complete task",
                             criteria=["mechanical", "standard", "multi-step", "frontier"]),
@@ -199,10 +207,14 @@ def route_model(
     ):
         threshold = min(min_confidence, MECHANICAL_CONFIDENCE)
 
-    selected = (proposed if answer.certainty >= threshold
-                else _fallback(answer.probabilities, ordinary, strongest))
+    fallback = None
+    if answer.certainty >= threshold:
+        selected = proposed
+    else:
+        selected = _fallback(answer.probabilities, ordinary, strongest)
+        fallback = "low_confidence"
     if selected not in eligible and selected != "human":
-        selected = strongest
+        selected, fallback = strongest, "not_eligible"
 
     decision = {
         "selected": selected,
@@ -212,8 +224,12 @@ def route_model(
         "complexity": complexity,
         "probabilities": answer.probabilities,
         "source": "model",
+        "fallback": fallback,
+        "latency_ms": getattr(result, "latency_ms", None),
+        "input_tokens": getattr(result, "input_tokens", None),
+        "output_tokens": getattr(result, "output_tokens", None),
     }
-    write_trace("model_router", state, decision)
+    write_trace("model_router", state, decision, meta=trace_meta)
     return decision
 
 
