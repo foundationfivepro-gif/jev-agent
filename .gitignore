@@ -1,7 +1,12 @@
 # Secrets — never commit
 .env
+.env.*
 *.key
 *.pem
+.codex/
+
+# Vercel project link is per-machine
+.vercel/
 
 # Decision traces contain hashed state but are run artifacts, not source
 traces/

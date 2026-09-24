@@ -75,7 +75,8 @@ RETRY = RetryPolicy(
     timeout=30.0,
 )
 
-TRACE_DIR = Path(os.getenv("JEV_TRACE_DIR", "traces"))
+# Anchored to this file: MCP clients launch the server from arbitrary cwds, including read-only `/`.
+TRACE_DIR = Path(os.getenv("JEV_TRACE_DIR") or Path(__file__).resolve().parent / "traces")
 
 
 class TransportError(RuntimeError):
