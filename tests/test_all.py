@@ -755,3 +755,11 @@ def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch
     assert rep["subagents_not_routed_by_jev"] == 1
     # Shape only: a subagent's output never lands in a trace.
     assert not any("secret output" in f.read_text() for f in tmp_path.iterdir())
+
+
+def test_update_script_parses_and_restarts_after_pulling():
+    """`git pull` can rewrite update.sh while bash is still reading it."""
+    path = os.path.join(ROOT, "update.sh")
+    assert subprocess.run(["bash", "-n", path]).returncode == 0
+    src = open(path).read()
+    assert 'exec bash "$HERE/update.sh"' in src and "--ff-only" in src
