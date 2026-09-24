@@ -38,7 +38,7 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
-from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
+from model_router import CATALOGS, catalog_for, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
@@ -169,8 +169,9 @@ class ModelRouteDecision(BaseModel):
     """Which executor model to hand a task to."""
 
     selected: str = Field(description=(
-        "Catalog key to pass as the Agent tool's `model` parameter (haiku, sonnet, opus, "
-        "fable), or 'human' when none should attempt it unaided."
+        "Catalog key to pass as the subagent's model — Claude Code: haiku, sonnet, opus, "
+        "fable; Codex: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol, gpt-6-astra — or 'human' "
+        "when none should attempt it unaided."
     ))
     model_id: str | None = Field(description="API model id for `selected`; null for 'human'.")
     proposed: str | None = Field(description="What Jev proposed before the confidence gate.")
@@ -551,17 +552,21 @@ def jev_route_model(
     max_cost_in: Annotated[float, Field(default=1e9, description=(
         "Exclude models whose input price per million tokens exceeds this."
     ))] = 1e9,
+    preset: Annotated[str | None, Field(default=None, description=(
+        "Which built-in catalog: 'claude' (haiku, sonnet, opus, fable) or 'codex' "
+        "(gpt-5.6-luna, -terra, -sol, gpt-6-astra). Omit to use $JEV_CATALOG, else claude."
+    ))] = None,
     catalog: Annotated[dict | None, Field(default=None, description=(
-        "Optional override: {name: {fit, cost_in, cost_out, tier, id?}}. Omit to use "
-        "the built-in Claude catalog (haiku, sonnet, opus, fable at first-party rates)."
+        "Full override: {name: {fit, cost_in, cost_out, tier, id?, escalation_only?}}. "
+        "Wins over preset."
     ))] = None,
 ) -> ModelRouteDecision:
     """
-    Pick the cheapest Claude model that should pass, before spawning a subagent.
+    Pick the cheapest model that should pass, before spawning a subagent.
 
-    Pass `selected` straight to the Agent tool's `model` parameter. The catalog
-    is ordered by price, and Fable sits at the TOP of it — twice Opus per token
-    — so it is what comes back when Opus is judged insufficient, never a default.
+    Pass `selected` straight to the subagent's model parameter. The catalog is
+    ordered by price and its top tier (Fable for Claude, Astra for Codex) is
+    escalation-only: twice the next tier per token, or fifty times the bottom.
 
     Fails toward capability: below 75% confidence the strongest ordinary tier
     (Opus) is returned, because a cheap failure costs the cheap attempt plus the
@@ -581,7 +586,7 @@ def jev_route_model(
     if not task.strip():
         raise ValueError("task is empty")
 
-    cat = catalog or DEFAULT_CATALOG
+    cat = catalog or catalog_for(preset)
     try:
         d = route_model(task, catalog=cat, needs_browser=needs_browser, max_cost_in=max_cost_in)
     except TransportError as exc:

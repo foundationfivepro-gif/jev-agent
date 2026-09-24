@@ -35,8 +35,15 @@ What leaves the machine: the prompt text (first MAX_TASK_CHARS) and the command
 line go to Jev through the gateway. Anything credential-shaped is held back
 and turned into `ask` without being sent.
 
+Codex speaks the same hook contract — the same JSON in, the same JSON out, exit
+2 to block — so these subcommands serve it unchanged. Only the wiring differs:
+`~/.codex/hooks.json`, commands as shell strings, and JEV_CATALOG=codex so the
+router answers with Codex model ids. Codex's docs do not name the tool that
+spawns a subagent, so there is no route-agent hook for it; AGENTS.md tells the
+agent to call jev_route_model and pass `selected` on the spawn instead.
+
     python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md,
-                                          # ~/.codex/AGENTS.md, ~/.codex/config.toml
+                                          # ~/.codex/{AGENTS.md,config.toml,hooks.json}
     python3 hooks.py install --dry-run
     echo '{"tool_input":{"command":"rm -rf /"}}' | python3 hooks.py gate-bash
 
@@ -198,10 +205,11 @@ def route_agent(data: dict) -> None:
         return
 
     from core import TransportError
-    from model_router import DEFAULT_CATALOG, route_model
+    from model_router import catalog_for, route_model
 
+    cat = catalog_for()
     try:
-        d = route_model(task[:MAX_TASK_CHARS])
+        d = route_model(task[:MAX_TASK_CHARS], catalog=cat)
     except TransportError as exc:
         print(f"jev route-agent: unreachable ({exc}); leaving model unset", file=sys.stderr)
         return
@@ -210,7 +218,7 @@ def route_agent(data: dict) -> None:
     if selected == "human":
         _emit(_pre_tool("ask", "jev_route_model: no model should attempt this unaided"))
         return
-    if selected not in DEFAULT_CATALOG:
+    if selected not in cat:
         return
     confidence = d.get("confidence")
     reason = (
@@ -286,6 +294,23 @@ def _merge_hooks(existing: dict, ours: dict, hooks_path: str) -> dict:
     return existing
 
 
+def _codex_env_line(text: str, key: str, value: str) -> str:
+    """Add key = "value" to the inline env table of [mcp_servers.jev] if absent."""
+    start = text.find("[mcp_servers.jev]")
+    if start == -1:
+        return text
+    end = text.find("\n[", start + 1)
+    section = text[start:] if end == -1 else text[start:end]
+    if f"{key} =" in section:
+        return text
+    patched = re.sub(
+        r'(env\s*=\s*\{)(.*?)(\})',
+        lambda m: f'{m.group(1)}{m.group(2).rstrip()}, {key} = "{value}" {m.group(3)}',
+        section, count=1, flags=re.DOTALL,
+    )
+    return text[:start] + patched + ("" if end == -1 else text[end:])
+
+
 def _place_block(text: str, block: str) -> str:
     if MARK_BEGIN in text and MARK_END in text:
         head, _, rest = text.partition(MARK_BEGIN)
@@ -355,19 +380,28 @@ def install(args: argparse.Namespace) -> None:
             target.write_text(_place_block(current, block), encoding="utf-8")
         print(f"policy   — {verb} {target}" + (f"  (backup {backup.name})" if backup else ""))
 
-    # Codex: MCP registration, if Codex is installed and jev is not yet registered.
+    # Codex: MCP registration with the Codex catalog, if Codex is installed.
     codex_cfg = home / ".codex" / "config.toml"
     if codex_cfg.is_file():
         text = codex_cfg.read_text(encoding="utf-8")
+        _load_env()
+        key = os.environ.get("AI_GATEWAY_API_KEY", "")
         if "[mcp_servers.jev]" in text:
-            print(f"codex    — {codex_cfg} already registers jev")
+            patched = _codex_env_line(text, "JEV_CATALOG", "codex")
+            if patched != text:
+                backup = _backup(codex_cfg, dry)
+                if not dry:
+                    codex_cfg.write_text(patched, encoding="utf-8")
+                print(f"codex    — {verb} JEV_CATALOG=codex into [mcp_servers.jev] in {codex_cfg}"
+                      + (f"  (backup {backup.name})" if backup else ""))
+            else:
+                print(f"codex    — {codex_cfg} already registers jev with the codex catalog")
         else:
-            _load_env()
-            key = os.environ.get("AI_GATEWAY_API_KEY", "")
             table = (
                 f"\n{CODEX_MARK}\n[mcp_servers.jev]\ncommand = \"{py}\"\n"
                 f"args = [\"{HERE / 'mcp_server.py'}\"]\n"
-                f"env = {{ AI_GATEWAY_API_KEY = \"{key}\" }}\nstartup_timeout_sec = 30\n"
+                f"env = {{ AI_GATEWAY_API_KEY = \"{key}\", JEV_CATALOG = \"codex\" }}\n"
+                f"startup_timeout_sec = 30\n"
             )
             backup = _backup(codex_cfg, dry)
             if not dry:
@@ -375,13 +409,39 @@ def install(args: argparse.Namespace) -> None:
             print(f"codex    — {verb} [mcp_servers.jev] into {codex_cfg}"
                   + (f"  (backup {backup.name})" if backup else "")
                   + ("" if key else "  (AI_GATEWAY_API_KEY empty: set it in .env and re-run)"))
+
+        # Codex hooks: same contract, shell-string commands, no spawn hook (the
+        # spawn tool is undocumented, so a matcher would be a guess).
+        codex_hooks = home / ".codex" / "hooks.json"
+        existing_codex: dict = {}
+        if codex_hooks.is_file():
+            try:
+                existing_codex = json.loads(codex_hooks.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"{codex_hooks} is not valid JSON ({exc}); refusing to overwrite it.")
+
+        def shell_entry(sub: str, msg: str) -> dict:
+            return {"type": "command", "timeout": 30, "statusMessage": msg,
+                    "command": f'JEV_CATALOG=codex "{py}" "{hooks_path}" {sub}'}
+
+        ours_codex = {
+            "UserPromptSubmit": [{"hooks": [shell_entry("prompt", "jev: evaluating prompt")]}],
+            "PreToolUse": [{"matcher": "^Bash$", "hooks": [shell_entry("gate-bash", "jev: gating command")]}],
+        }
+        merged_codex = _merge_hooks(existing_codex, ours_codex, hooks_path)
+        backup = _backup(codex_hooks, dry)
+        if not dry:
+            codex_hooks.write_text(json.dumps(merged_codex, indent=2) + "\n", encoding="utf-8")
+        print(f"codex    — {verb} {codex_hooks}" + (f"  (backup {backup.name})" if backup else ""))
+        print("             UserPromptSubmit -> prompt, PreToolUse Bash -> gate-bash "
+              "(no spawn hook: Codex does not document the spawn tool name)")
     else:
-        print("codex    — no ~/.codex/config.toml; skipped MCP registration")
+        print("codex    — no ~/.codex/config.toml; skipped MCP registration and hooks")
 
     print()
     print("Claude Code watches settings files it knew about at startup. If settings.json")
     print("did not exist when your session began, restart it or open /hooks once. Codex")
-    print("reads AGENTS.md and config.toml on its next start.")
+    print("reads AGENTS.md, config.toml and hooks.json on its next start.")
 
 
 # ---------------------------------------------------------------------- main
