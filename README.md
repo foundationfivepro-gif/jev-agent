@@ -13,6 +13,20 @@ python -m pytest tests/ -q
 ./install.sh all          # skills + hooks + policy + MCP registration for Claude Code
 ```
 
+## Install or update on a computer
+
+One command, the same on every computer, in a terminal or in Claude Code (prefix it with
+`!`). It finds the existing install from the hooks in `~/.claude/settings.json`, or clones
+to `~/jev-agent`, then runs `update.sh`: pull, requirements if missing, skills, hooks,
+policy, MCP registration if missing, and a check that the hooks answer.
+
+```bash
+d=$(python3 -c 'import json,os;s=json.load(open(os.path.expanduser("~/.claude/settings.json")));print(next(os.path.dirname(a) for g in s["hooks"].values() for x in g for h in x.get("hooks",[]) for a in h.get("args",[]) if a.endswith("/hooks.py")))' 2>/dev/null || echo "$HOME/jev-agent"); [ -d "$d/.git" ] || git clone -q https://github.com/foundationfivepro-gif/jev-agent.git "$d"; git -C "$d" pull --ff-only -q && bash "$d/update.sh"
+```
+
+After the first run, `/jev-update` in Claude Code does the same. A new computer also
+needs `AI_GATEWAY_API_KEY` in `<repo>/.env`; without it only the local parts run.
+
 ## Deploying to Claude Code
 
 This repository targets Claude Code only. Everything here is tuned for one goal: the
