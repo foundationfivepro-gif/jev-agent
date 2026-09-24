@@ -427,6 +427,41 @@ def test_route_model_mechanical_tasks_accept_cheap_tier_at_lower_bar(monkeypatch
     assert route("x")["selected"] == "opus"            # nor does it accept 'human' cheaply
 
 
+def test_route_model_uncertain_fallback_stops_at_strongest_tier_considered(monkeypatch):
+    """A sonnet-vs-haiku split never needed Opus; weight on Opus, Fable or human still does."""
+    import model_router
+
+    class Answer:
+        def __init__(self, value, certainty, probabilities):
+            self.value, self.certainty, self.probabilities = value, certainty, probabilities
+
+    class Result:
+        def __init__(self, value, certainty, probabilities):
+            self.answers = {"model": Answer(value, certainty, probabilities)}
+
+        def value(self, _):
+            return 1.5
+
+    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: None)
+
+    def route(value, certainty, probs, **kw):
+        monkeypatch.setattr(model_router, "decide", lambda s, q: Result(value, certainty, probs))
+        return model_router.route_model("x", **kw)["selected"]
+
+    # Real traces from 2026-09-22 that used to escalate to Opus.
+    assert route("sonnet", 0.54, {"sonnet": 0.63, "haiku": 0.37}) == "sonnet"
+    assert route("sonnet", 0.67, {"sonnet": 0.75, "opus": 0.25}) == "opus"
+    assert route("haiku", 0.40, {"haiku": 0.6, "sonnet": 0.3, "opus": 0.1}) == "sonnet"
+    # Mass on a tier outside the ordinary set means "hard": strongest ordinary, never Fable.
+    assert route("sonnet", 0.5, {"sonnet": 0.5, "fable": 0.3, "haiku": 0.2}) == "opus"
+    assert route("sonnet", 0.5, {"sonnet": 0.55, "human": 0.25, "haiku": 0.2}) == "opus"
+    # No probabilities to reason about: unchanged behaviour.
+    assert route("sonnet", 0.5, {}) == "opus"
+    # Same rule on the Codex catalog: a luna/terra split stays at terra.
+    assert route("gpt-5.6-terra", 0.5, {"gpt-5.6-terra": 0.6, "gpt-5.6-luna": 0.4},
+                 catalog=model_router.CODEX_CATALOG) == "gpt-5.6-terra"
+
+
 def test_route_model_is_exposed_remotely():
     """Pure logic, so it belongs on the connector too."""
     import remote_server

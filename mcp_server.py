@@ -569,8 +569,9 @@ def jev_route_model(
     escalation-only: twice the next tier per token, or fifty times the bottom.
 
     Fails toward capability: below 75% confidence the strongest ordinary tier
-    (Opus) is returned, because a cheap failure costs the cheap attempt plus the
-    expensive retry plus the latency of noticing. The one exception is a
+    that Jev gave at least 20% weight is returned (a sonnet/haiku split stays on
+    Sonnet; weight on Opus, Fable or human means Opus), because a cheap failure
+    costs the cheap attempt plus the expensive retry plus the latency of noticing. The one exception is a
     mechanical task (complexity under 0.5), where a cheap-tier proposal is
     accepted from 50% — a Haiku retry on a one-line edit is nearly free. Fable
     is escalation-only: it comes back when Jev proposes it with confidence for

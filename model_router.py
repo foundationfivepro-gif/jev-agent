@@ -33,11 +33,17 @@ MIN_CONFIDENCE = 0.75
 MECHANICAL_COMPLEXITY = 0.5
 MECHANICAL_CONFIDENCE = 0.5
 
+# An uncertain route falls back to the strongest tier Jev gave real weight to,
+# not blindly to the top: a sonnet-vs-haiku split never needed Opus. Weight on a
+# tier outside the ordinary set (escalation-only, or human) still means the
+# strongest ordinary tier — that mass is a signal the task is hard.
+MIN_FALLBACK_MASS = 0.2
+
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
 # Fable is the top of the range, not a cheap tier: it costs twice Opus. It is
 # escalation_only — Jev may propose it with confidence, but an *uncertain* route
-# falls back to the strongest ordinary tier (Opus), never up to Fable.
+# falls back to an ordinary tier (at most Opus), never up to Fable.
 DEFAULT_CATALOG: dict[str, dict] = {
     "haiku":  {"id": "claude-haiku-4-5",
                "fit": "Classification, formatting, simple mechanical edits, "
@@ -133,6 +139,14 @@ def estimate_costs(
     }
 
 
+def _fallback(probabilities: Mapping[str, float] | None,
+              ordinary: Mapping[str, Mapping], strongest: str) -> str:
+    contenders = [k for k, p in (probabilities or {}).items() if p >= MIN_FALLBACK_MASS]
+    if not contenders or any(k not in ordinary for k in contenders):
+        return strongest
+    return max(contenders, key=lambda k: ordinary[k]["tier"])
+
+
 def route_model(
     task: str,
     *,
@@ -169,9 +183,10 @@ def route_model(
 
     answer = result.answers["model"]
     # Fail closed toward capability: an uncertain route goes to the strongest
-    # eligible model, because a cheap failure costs the cheap attempt plus the
-    # expensive retry plus the latency of noticing. Escalation-only tiers are
-    # excluded from that fallback — uncertainty is not a reason to pay double.
+    # tier Jev seriously considered (see MIN_FALLBACK_MASS), because a cheap
+    # failure costs the cheap attempt plus the expensive retry plus the latency
+    # of noticing. Escalation-only tiers are excluded from that fallback —
+    # uncertainty is not a reason to pay double.
     ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
     strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
     proposed = str(answer.value)
@@ -184,7 +199,8 @@ def route_model(
     ):
         threshold = min(min_confidence, MECHANICAL_CONFIDENCE)
 
-    selected = proposed if answer.certainty >= threshold else strongest
+    selected = (proposed if answer.certainty >= threshold
+                else _fallback(answer.probabilities, ordinary, strongest))
     if selected not in eligible and selected != "human":
         selected = strongest
 

@@ -316,8 +316,9 @@ def jev_route_model(
 
     Claude catalog, USD per million tokens: haiku 1/5, sonnet 2/10, opus 5/25,
     fable 10/50. Codex: luna 0.2/1.2, terra 2/12, sol 4/20, astra 10/50, with
-    the same escalation-only rule on the top tier. Fails toward capability — below 75% confidence Opus is
-    returned, except on mechanical tasks (complexity under 0.5) where a cheap
+    the same escalation-only rule on the top tier. Fails toward capability — below 75% confidence the
+    strongest ordinary tier Jev gave at least 20% weight is returned (weight on Opus, Fable or human
+    means Opus), except on mechanical tasks (complexity under 0.5) where a cheap
     tier is accepted from 50% — and Fable is escalation-only: it comes back
     when Jev proposes it with confidence for frontier-complexity architecture
     or design, never as the fallback for an uncertain route. `human` means do
