@@ -10,74 +10,64 @@ transport — see "One transport, on purpose" below.
 pip install -r requirements.txt
 cp .env.example .env      # set AI_GATEWAY_API_KEY
 python -m pytest tests/ -q
-./install.sh all          # skills + hooks + policy + MCP registration for Claude Code and Codex
+./install.sh all          # skills + hooks + policy + MCP registration for Claude Code
 ```
 
-## Deploying to Claude Code and Codex
+## Deploying to Claude Code
 
-Two artifacts with different reach. Do not confuse them.
+This repository targets Claude Code only. Everything here is tuned for one goal: the
+fewest tokens in Claude's context for the same result.
 
-| | skills / rules | MCP server (`mcp_server.py`) |
+| | skills | hooks | MCP server (`mcp_server.py`) |
+|---|---|---|---|
+| installs to | `~/.claude/skills` | `~/.claude/settings.json` + `~/.claude/CLAUDE.md` | `claude mcp add jev ...` |
+| needs a key | no | for the Jev calls; the hard block and return contract need none | yes |
+| runs | when a description matches | on every prompt, command and subagent | when Claude calls a tool |
+
+Files on disk do **not** sync to Claude mobile; only skills saved to your Claude account do.
+
+### Where the tokens are saved
+
+| lever | mechanism | saving |
 |---|---|---|
-| Claude Code desktop + CLI | `SKILL.md` → `~/.claude/skills` | yes |
-| Codex CLI | `SKILL.md` → `~/.agents/skills` (same files) | yes |
-| Cursor | `.mdc` → `<repo>/.cursor/rules` (converted, per repo) | yes |
-| Grok CLI | **already reads `~/.claude/skills`** via `[compat.claude]` | yes — `[mcp_servers.jev]` in `~/.grok/config.toml` |
-| Claude mobile | only if saved to your **account** | no (local process) |
-| needs a key | no | yes |
-| what it does | makes the agent decide better | does the deciding, and saves the tokens |
+| read less | `jev_select_context` before reading files | 508k → 3.9k tokens on a 188-file repo |
+| short subagent returns | `route-agent` appends a return contract to every subagent prompt: conclusion only, file:line references, under 250 words | the parent reads, and keeps in context for the rest of the session, a conclusion instead of a transcript |
+| cheapest sufficient model | `route-agent` routes every spawn without an explicit `model` | Haiku at a fifth of Opus's price where it passes; Fable only on a confident frontier call |
+| no duplicate decisions | the policy tells Claude the hooks already gate commands and route spawns, so it does not also call `jev_gate_command` / `jev_route_model` | one tool round-trip and one Jev call per command and per spawn |
+| quiet by default | the per-prompt note is injected only when repository context is needed | nothing added to context on prompts that need no files |
+| small fixed cost | policy under 2,000 characters (loads into every session and subagent); tool descriptions cut from ~11k to ~6.7k characters | paid once per session and per subagent |
 
-**Skills.** Codex and Claude use the same `SKILL.md` contract — `name` + `description`
-frontmatter — so one set of files serves both. `install.sh skills` copies them to
-`~/.claude/skills` and `~/.agents/skills`. They load when their description matches.
-Files on disk do **not** sync to mobile; only skills saved to your Claude account do.
-
-**MCP server.** A local stdio process exposing eight read-only tools — six for
-coding agents, two for automation harnesses. It decides; it never edits files or
-runs commands.
-
-| tool | use |
-|---|---|
-| `jev_select_context` | **before reading files** — 508k → 3.9k tokens on a 188-file repo |
-| `jev_gate_command` | before running any shell command |
-| `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
-| `jev_evaluate` | arbitrary typed decisions |
-| `jev_file_outline` | exported symbols without loading the file; local-only |
-| `jev_route_model` | before spawning a subagent — cheapest model that should pass; `selected` goes straight into the subagent's model. Catalog follows the harness (`preset` or `JEV_CATALOG`: claude or codex); the top tier (Fable, Astra) is escalation-only |
-| `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
-| `jev_check_action` | before any action with external effect, against plain-English policy |
-
-`./install.sh mcp` prints the exact registration for Claude Code and Codex.
-
-**Hooks (Claude Code only).** The tools are advisory — the agent calls them when it
-thinks to. `hooks.py` makes three of them events Claude Code runs on its own:
+### Hooks
 
 | event | hook | what runs |
 |---|---|---|
-| `UserPromptSubmit` | `prompt` | one Jev call per prompt: complexity and whether repository context is needed, injected as a one-line note |
+| `SessionStart` | `session` | one line, `jev hooks active: ...`, telling the policy that gating and routing are enforced here; local, no call |
+| `UserPromptSubmit` | `prompt` | one Jev call per prompt; a one-line note only when repository context is needed |
 | `PreToolUse` on `Bash` | `gate-bash` | `jev_gate_command`; a hard block is deterministic and needs no key |
-| `PreToolUse` on `Agent\|Task` | `route-agent` | `jev_route_model`; sets `model` on a subagent that did not choose one |
+| `PreToolUse` on `Agent\|Task` | `route-agent` | appends the return contract (local, no key); sets `model` via `jev_route_model` when none was chosen |
+| `PostToolUse` / `PostToolUseFailure` on `Agent\|Task` | `agent-outcome` | records whether the subagent returned or failed, keyed by `tool_use_id`; local, no call |
+
+`python3 hooks.py report` joins each routing decision to its outcome: fallback reasons
+(`low_confidence`, `invalid_response`, `transport_error`, ...), ok/error counts per
+selected model, and median Jev latency. Traces store shapes and hashes, never subagent
+output.
+
+Every Jev answer is checked before it is used: the choice must be one that was offered
+and the most probable one, and probabilities must lie in 0..1 and sum to 1. A malformed
+answer is an `InvalidResponse` (a `TransportError`), so every caller treats it as no
+decision. Questions over prompts, commands and subagent tasks tell Jev that text is
+untrusted data, not instructions.
 
 `./install.sh hooks` merges them into `~/.claude/settings.json` (user scope, so every
-session) and places the defaults policy (`CLAUDE.md`) in `~/.claude/CLAUDE.md`.
-
-**Codex** speaks the same hook contract — same JSON in and out, exit 2 to block — so the
-installer also writes `prompt` and `gate-bash` into `~/.codex/hooks.json` (shell-string
-commands, `JEV_CATALOG=codex`), appends the policy to `~/.codex/AGENTS.md`, and registers
-the server in `~/.codex/config.toml` with `JEV_CATALOG=codex` so `jev_route_model` answers
-with Codex model ids (`gpt-5.6-luna` 0.2/1.2, `-terra` 2/12, `-sol` 4/20, `gpt-6-astra`
-10/50; Astra is the escalation tier). What Codex does not get is a spawn hook: its docs do
-not name the tool that spawns a subagent, so a matcher would be a guess. There the policy
-tells the agent to call `jev_route_model` and pass `selected` on the spawn, which the docs
-confirm overrides `default_subagent_model`. Cursor has no hook surface at all; the policy
-rule and the skills are the mechanism.
+session) and places the defaults policy (`CLAUDE.md`) in `~/.claude/CLAUDE.md`. The two
+are installed together because the policy tells Claude the hooks exist.
 
 Because a hook runs on every event, it is built around three rules:
 
-- **A hook never bypasses your own permission rules.** On `allow` it says nothing. An
-  unreachable Jev, or one that has not answered within 20 seconds, becomes `ask` — a
-  hook that outlives Claude Code's timeout is killed and the call proceeds ungated, so
-  the deadline is answered explicitly, not waited out.
+- **A hook never bypasses your own permission rules** on commands. On `allow` the
+  command gate says nothing. An unreachable Jev, or one that has not answered within 20
+  seconds, becomes `ask` — a hook that outlives Claude Code's timeout is killed and the
+  call proceeds ungated, so the deadline is answered explicitly, not waited out.
 - **`deny` is reserved for the irreversible**, because the user cannot override it:
   the dangerous-construct patterns and `rm` aimed at root, home or a wildcard. A plain
   `rm -f build/tmp.o`, or a line `shlex` cannot parse, is `ask` — the MCP tool's
@@ -87,26 +77,41 @@ Because a hook runs on every event, it is built around three rules:
   costs. Anything credential-shaped is classified locally, held back, and turned into
   `ask` without being sent.
 
-**Cursor** differs twice, so it has its own installer. It does not read
-`SKILL.md` — its equivalent is `.cursor/rules/*.mdc`, different frontmatter — and
-those rules are **project-scoped**, not global, so they install per repository
-while the MCP config installs once.
+### Cowork, claude.ai and other sessions without the hooks
 
-```bash
-./install.sh cursor ~/code/myproject        # rules + mcp.json
-python3 install_cursor.py --repo ~/code/x --dry-run
-python3 install_cursor.py --mcp-only        # server only
-```
+The policy keys off the `jev hooks active` line, not off where it is installed. With the
+line, Claude leaves gating and routing to the hooks; without it, Claude calls
+`jev_gate_command` and `jev_route_model` itself. So one conditional rule covers every
+surface: a hooked Claude Code session never pays twice, and an unhooked one never goes
+ungated.
 
-The rules convert to *agent-selected* mode (`alwaysApply: false`), which is the
-closest analogue to how a skill behaves — Cursor pulls one in when its
-description matches. `context-tiering` and `jev-evaluation` also carry `globs` so
-they auto-attach when relevant source files are in context.
+To carry that rule to surfaces that do not read `~/.claude/CLAUDE.md`, put the same
+condition in your claude.ai personal preferences (Settings → Profile):
 
-The `mcp.json` write is a **merge**: existing servers are preserved, a timestamped
-backup is written first, and an unparseable file is refused rather than
-overwritten. Cursor does not expand shell variables in `mcp.json`, so pass
-`--key` or point `env` at an `envFile`.
+> Before any action with external effect (sending, posting, deleting, paying, deploying),
+> call jev_check_action. Before sending file contents to an outside service, call
+> jev_classify_data; secret means stop. Before reading files to find something, call
+> jev_select_context. Unless the session context says "jev hooks active": call
+> jev_gate_command before shell commands (never run review or block), and
+> jev_route_model before delegating (use the model it selects).
+
+There the tools come from the remote connector (`remote_server.py`, below).
+
+### MCP tools
+
+A local stdio process exposing eight read-only tools. It decides; it never edits files
+or runs commands. `./install.sh mcp` prints the registration.
+
+| tool | use |
+|---|---|
+| `jev_select_context` | **before reading files** — 508k → 3.9k tokens on a 188-file repo |
+| `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
+| `jev_check_action` | before any action with external effect, against plain-English policy |
+| `jev_file_outline` | exported symbols without loading the file; local-only |
+| `jev_evaluate` | arbitrary typed decisions |
+| `jev_gate_command` | the Bash hook runs it; call directly only where no hook runs |
+| `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Fable is escalation-only |
+| `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
 
 ## Universal reach: local vs remote
 

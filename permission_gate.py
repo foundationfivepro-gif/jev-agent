@@ -25,7 +25,7 @@ import sys
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Iterable
 
-from core import Choice, Noul, Score, decide, write_trace
+from core import UNTRUSTED, Choice, Noul, Score, decide, write_trace
 
 # Binaries that are never run automatically, whatever Jev thinks.
 #
@@ -152,7 +152,7 @@ def gate(command: str, cwd: str = ".") -> dict:
 
     result = decide(state, {
         "route": Choice(
-            instructions="How should this command be handled?",
+            instructions="How should this command be handled?" + UNTRUSTED,
             criteria={
                 "allow": "Read-only, reversible, confined to the workspace",
                 "review": "Writes, network access, installs, or unclear effect",

@@ -457,9 +457,6 @@ def test_route_model_uncertain_fallback_stops_at_strongest_tier_considered(monke
     assert route("sonnet", 0.5, {"sonnet": 0.55, "human": 0.25, "haiku": 0.2}) == "opus"
     # No probabilities to reason about: unchanged behaviour.
     assert route("sonnet", 0.5, {}) == "opus"
-    # Same rule on the Codex catalog: a luna/terra split stays at terra.
-    assert route("gpt-5.6-terra", 0.5, {"gpt-5.6-terra": 0.6, "gpt-5.6-luna": 0.4},
-                 catalog=model_router.CODEX_CATALOG) == "gpt-5.6-terra"
 
 
 def test_route_model_is_exposed_remotely():
@@ -469,11 +466,13 @@ def test_route_model_is_exposed_remotely():
     assert "jev_route_model" in names
 
 
-def test_policy_is_the_same_for_every_harness():
+def test_policy_says_hooks_do_the_gating_and_routing():
+    """A policy telling Claude to call what a hook already calls pays for every decision twice."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    claude = open(os.path.join(root, "CLAUDE.md")).read()
-    codex = open(os.path.join(root, "AGENTS.md")).read()
-    assert claude == codex, "CLAUDE.md (Claude Code) and AGENTS.md (Codex) have drifted"
+    policy = open(os.path.join(root, "CLAUDE.md")).read()
+    assert "hook" in policy and "jev_select_context" in policy
+    assert "Codex" not in policy and "Cursor" not in policy
+    assert len(policy) < 2000, "the policy loads into every session and every subagent"
 
 
 # ------------------------------------------------------------------------ hooks
@@ -549,7 +548,34 @@ def test_hook_gate_bash_is_silent_without_key(tmp_path):
 
 def test_hook_route_agent_respects_explicit_model(tmp_path):
     r = _hook("route-agent", {"tool_input": {"prompt": "do a thing", "model": "opus"}}, tmp_path)
-    assert r.returncode == 0 and r.stdout == ""
+    assert r.returncode == 0, r.stderr
+    updated = json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]
+    assert updated["model"] == "opus"
+
+
+def test_session_hook_announces_the_exact_signal_the_policy_keys_off(tmp_path):
+    """One rule serves hooked and unhooked surfaces only if the signal and the policy agree."""
+    import hooks
+    r = _hook("session", {"hook_event_name": "SessionStart", "source": "startup"}, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["hookEventName"] == "SessionStart"
+    assert out["additionalContext"].startswith(hooks.HOOKS_ACTIVE)
+    assert "routing off" in out["additionalContext"]          # no key in this test
+    policy = open(os.path.join(ROOT, "CLAUDE.md")).read()
+    assert f"`{hooks.HOOKS_ACTIVE}`" in policy
+
+
+def test_hook_route_agent_adds_return_contract_once_without_a_key(tmp_path):
+    """The parent pays for every word a subagent returns; the contract costs no call."""
+    import hooks
+    r = _hook("route-agent", {"tool_input": {"prompt": "find the retry logic", "description": "d"}}, tmp_path)
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    prompt = out["updatedInput"]["prompt"]
+    assert prompt.startswith("find the retry logic") and prompt.count(hooks.RETURN_MARK) == 1
+    assert "model" not in out["updatedInput"]
+    again = _hook("route-agent", {"tool_input": {"prompt": prompt}}, tmp_path)
+    assert again.returncode == 0 and again.stdout == ""
 
 
 def test_hook_prompt_never_breaks_submission(tmp_path):
@@ -571,9 +597,6 @@ def test_hooks_install_merges_and_is_idempotent(tmp_path):
         ]}]},
     }))
     (tmp_path / ".claude" / "CLAUDE.md").write_text("# mine\n\nkeep this\n")
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex" / "config.toml").write_text('model = "x"\n')
-    (tmp_path / ".codex" / "AGENTS.md").write_text("# codex rules\n")
 
     env = {**os.environ, "JEV_ENV_FILE": str(tmp_path / "absent.env")}
     for _ in range(2):
@@ -588,33 +611,93 @@ def test_hooks_install_merges_and_is_idempotent(tmp_path):
     ours = [h for g in s["hooks"]["PreToolUse"] for h in g["hooks"] if "hooks.py" in " ".join(h.get("args", []))]
     assert sorted(h["args"][-1] for h in ours) == ["gate-bash", "route-agent"]
     assert len(s["hooks"]["UserPromptSubmit"]) == 1
+    [start] = s["hooks"]["SessionStart"]
+    assert start["hooks"][0]["args"][-1] == "session"
+    for event in ("PostToolUse", "PostToolUseFailure"):
+        [group] = s["hooks"][event]
+        assert group["matcher"] == "Agent|Task" and group["hooks"][0]["args"][-1] == "agent-outcome"
 
     md = (tmp_path / ".claude" / "CLAUDE.md").read_text()
     assert md.startswith("# mine") and md.count("jev-agent:begin") == 1
-    agents = (tmp_path / ".codex" / "AGENTS.md").read_text()
-    assert agents.startswith("# codex rules") and agents.count("jev-agent:begin") == 1
-    toml = (tmp_path / ".codex" / "config.toml").read_text()
-    assert toml.startswith('model = "x"') and toml.count("[mcp_servers.jev]") == 1
+    assert not (tmp_path / ".codex").exists()
 
 
-# ------------------------------------------------------------------- codex
+# ------------------------------------------------------- response validation
 
-def test_catalog_follows_the_harness(monkeypatch):
-    from model_router import CODEX_CATALOG, DEFAULT_CATALOG, catalog_for
-    monkeypatch.delenv("JEV_CATALOG", raising=False)
-    assert catalog_for() is DEFAULT_CATALOG
-    assert catalog_for("codex") is CODEX_CATALOG
-    monkeypatch.setenv("JEV_CATALOG", "codex")
-    assert catalog_for() is CODEX_CATALOG
-    with pytest.raises(ValueError):
-        catalog_for("gemini")
-    # Both catalogs have exactly one escalation-only tier, and it is the priciest.
-    for cat in (DEFAULT_CATALOG, CODEX_CATALOG):
-        esc = [k for k, v in cat.items() if v.get("escalation_only")]
-        assert len(esc) == 1 and cat[esc[0]]["tier"] == max(v["tier"] for v in cat.values())
+def _gateway_reply(monkeypatch, body):
+    import io
+    import core
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
+    monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout: Resp(json.dumps(body).encode()))
 
 
-def test_codex_uncertain_route_falls_to_sol_not_astra(monkeypatch):
+def _route_questions():
+    from core import Choice, Noul
+    return {
+        "pick": Choice(instructions="x", criteria={"a": "first", "b": "second"}),
+        "ok": Noul(instructions="y"),
+    }
+
+
+def _answers(choice="a", probs=None, noul=0.8):
+    return {"answers": {
+        "pick": {"type": "choice", "choice": choice, "confidence": 0.9,
+                 "probabilities": probs if probs is not None else {"a": 0.9, "b": 0.1}},
+        "ok": {"type": "boolean", "probability": noul},
+    }, "usage": {"inputTokens": 10, "outputTokens": 2}}
+
+
+def test_well_formed_answer_passes_and_reports_latency(monkeypatch):
+    import core
+    _gateway_reply(monkeypatch, _answers())
+    d = core.decide({"t": 1}, _route_questions())
+    assert d["pick"] == "a" and d.latency_ms is not None and d.input_tokens == 10
+
+
+@pytest.mark.parametrize("body,why", [
+    (_answers(choice="c", probs={"a": 0.5, "b": 0.5}), "not offered"),
+    (_answers(probs={"a": 0.9, "b": 0.4}), "sum to"),
+    (_answers(choice="b"), "not the most probable"),
+    (_answers(probs={"a": 0.9, "zzz": 0.1}), "not offered"),
+    (_answers(noul=1.7), "outside 0..1"),
+    ({"answers": {"pick": _answers()["answers"]["pick"]}}, "not answered"),
+    ({"answers": {"pick": {**_answers()["answers"]["pick"], "type": "score"},
+                  "ok": _answers()["answers"]["ok"]}}, "asked choice"),
+    ({"error": "nope"}, "no answers"),
+])
+def test_malformed_answer_is_refused_not_trusted(monkeypatch, body, why):
+    """A confident wrong route starts as an answer nobody checked."""
+    import core
+    _gateway_reply(monkeypatch, body)
+    with pytest.raises(core.InvalidResponse, match=why):
+        core.decide({"t": 1}, _route_questions())
+
+
+def test_invalid_response_is_a_transport_error_so_every_caller_fails_safe():
+    import core
+    assert issubclass(core.InvalidResponse, core.TransportError)
+
+
+def test_questions_over_untrusted_text_say_so():
+    import inspect
+    import hooks
+    import model_router
+    import permission_gate
+    for mod in (hooks, model_router, permission_gate):
+        assert "UNTRUSTED" in inspect.getsource(mod), mod.__name__
+
+
+# ------------------------------------------------------------ outcome loop
+
+def test_route_model_names_its_fallback_and_carries_join_keys(monkeypatch):
     import model_router
 
     class Answer:
@@ -622,40 +705,53 @@ def test_codex_uncertain_route_falls_to_sol_not_astra(monkeypatch):
             self.value, self.certainty, self.probabilities = value, certainty, {}
 
     class Result:
+        latency_ms, input_tokens, output_tokens = 120, 300, 20
+
         def __init__(self, value, certainty):
             self.answers = {"model": Answer(value, certainty)}
 
         def value(self, _):
-            return 1.5
+            return 2.0
 
-    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: None)
-    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("gpt-6-astra", 0.4))
-    assert model_router.route_model("x", catalog=model_router.CODEX_CATALOG)["selected"] == "gpt-5.6-sol"
+    seen = {}
+    monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: seen.update(k))
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.9))
+    d = model_router.route_model("x", trace_meta={"tool_use_id": "toolu_1"})
+    assert d["fallback"] is None and d["latency_ms"] == 120
+    assert seen["meta"] == {"tool_use_id": "toolu_1"}
+
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.3))
+    assert model_router.route_model("x")["fallback"] == "low_confidence"
 
 
-def test_codex_install_writes_hooks_and_catalog_env(tmp_path):
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex" / "config.toml").write_text(
-        'model = "x"\n\n[mcp_servers.jev]\ncommand = "python3"\nargs = ["/x/mcp_server.py"]\n'
-        'env = { AI_GATEWAY_API_KEY = "k" }\nstartup_timeout_sec = 30\n\n[other]\na = 1\n'
-    )
-    (tmp_path / ".codex" / "hooks.json").write_text(json.dumps(
-        {"hooks": {"PreToolUse": [{"matcher": "^Bash$", "hooks": [{"type": "command", "command": "echo theirs"}]}]}}
-    ))
-    env = {**os.environ, "JEV_ENV_FILE": str(tmp_path / "absent.env")}
-    for _ in range(2):
-        subprocess.run([_sys.executable, os.path.join(ROOT, "hooks.py"), "install", "--home", str(tmp_path)],
-                       check=True, capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
+def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch):
+    import core
+    import hooks
 
-    import tomllib
-    cfg = tomllib.loads((tmp_path / ".codex" / "config.toml").read_text())
-    assert cfg["mcp_servers"]["jev"]["env"] == {"AI_GATEWAY_API_KEY": "k", "JEV_CATALOG": "codex"}
-    assert cfg["other"]["a"] == 1 and cfg["model"] == "x"
+    monkeypatch.setattr(core, "TRACE_DIR", tmp_path)
+    core.write_trace("model_router", {"task": "a"}, {"selected": "haiku", "fallback": None,
+                     "latency_ms": 90}, meta={"tool_use_id": "t1"})
+    core.write_trace("model_router", {"task": "b"}, {"selected": "opus", "fallback": "low_confidence",
+                     "latency_ms": 110}, meta={"tool_use_id": "t2"})
 
-    h = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
-    bash = [x for g in h["hooks"]["PreToolUse"] for x in g["hooks"]]
-    assert any(x["command"] == "echo theirs" for x in bash)
-    ours = [x for x in bash if "hooks.py" in x["command"]]
-    assert len(ours) == 1 and ours[0]["command"].startswith("JEV_CATALOG=codex ") and "args" not in ours[0]
-    assert len(h["hooks"]["UserPromptSubmit"]) == 1
+    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env.update(JEV_ENV_FILE=str(tmp_path / "absent.env"), JEV_TRACE_DIR=str(tmp_path))
+    run = lambda payload: subprocess.run(
+        [_sys.executable, os.path.join(ROOT, "hooks.py"), "agent-outcome"],
+        input=json.dumps(payload), capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
+    ok = run({"hook_event_name": "PostToolUse", "tool_use_id": "t1",
+              "tool_input": {"model": "haiku"}, "tool_response": {"content": "done"}})
+    bad = run({"hook_event_name": "PostToolUseFailure", "tool_use_id": "t2",
+               "tool_input": {"model": "opus"}, "error": "subagent crashed"})
+    extra = run({"hook_event_name": "PostToolUse", "tool_use_id": "t3",
+                 "tool_input": {"model": "sonnet"}, "tool_response": "secret output text"})
+    for r in (ok, bad, extra):
+        assert r.returncode == 0 and r.stdout == "", r.stderr
+
+    rep = hooks.report(tmp_path)
+    assert rep["routed"] == 2
+    assert rep["fallbacks"] == {"accepted": 1, "low_confidence": 1}
+    assert rep["outcomes_by_selected_model"] == {"haiku": {"ok": 1}, "opus": {"error": 1}}
+    assert rep["subagents_not_routed_by_jev"] == 1
+    # Shape only: a subagent's output never lands in a trace.
+    assert not any("secret output" in f.read_text() for f in tmp_path.iterdir())

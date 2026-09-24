@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
-from core import Choice, Score, decide, write_trace
+from core import UNTRUSTED, Choice, Score, decide, write_trace
 
 MIN_CONFIDENCE = 0.75
 
@@ -64,42 +64,6 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "for ordinary multi-step work that Opus handles",
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
-
-# OpenAI Codex, same shape. Keys are model ids as Codex's spawn accepts them.
-# Astra is the escalation tier: fifty times Luna's output price.
-CODEX_CATALOG: dict[str, dict] = {
-    "gpt-5.6-luna":  {"id": "gpt-5.6-luna",
-                      "fit": "Classification, formatting, simple mechanical edits, "
-                             "search-and-report subtasks that return a short answer",
-                      "cost_in": 0.20, "cost_out": 1.20, "tier": 1},
-    "gpt-5.6-terra": {"id": "gpt-5.6-terra",
-                      "fit": "Normal coding, research, multi-file edits, "
-                             "most day-to-day engineering",
-                      "cost_in": 2.0, "cost_out": 12.0, "tier": 2},
-    "gpt-5.6-sol":   {"id": "gpt-5.6-sol",
-                      "fit": "Complex architecture, hard debugging, subtle refactors, "
-                             "work where a wrong answer is expensive to detect",
-                      "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
-    "gpt-6-astra":   {"id": "gpt-6-astra",
-                      "fit": "Frontier complexity: long-horizon architecture, system design "
-                             "and complex multi-page web design where a wrong structural "
-                             "decision is expensive to unwind. Never routine tasks, and not "
-                             "for ordinary multi-step work that Sol handles",
-                      "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
-}
-
-CATALOGS: dict[str, dict[str, dict]] = {"claude": DEFAULT_CATALOG, "codex": CODEX_CATALOG}
-
-
-def catalog_for(name: str | None = None) -> dict[str, dict]:
-    """The catalog for a harness: explicit name, else $JEV_CATALOG, else Claude."""
-    import os
-
-    key = (name or os.environ.get("JEV_CATALOG") or "claude").lower()
-    if key not in CATALOGS:
-        raise ValueError(f"unknown catalog {key!r}; use one of {sorted(CATALOGS)}")
-    return CATALOGS[key]
-
 
 def estimate_costs(
     catalog: Mapping[str, Mapping], *, context_mtok: float, output_mtok: float, tool_mtok: float
@@ -154,15 +118,23 @@ def route_model(
     needs_browser: bool = False,
     max_cost_in: float = 1e9,
     min_confidence: float = MIN_CONFIDENCE,
+    trace_meta: Mapping[str, str] | None = None,
 ) -> dict:
-    """Choose the cheapest eligible executor that should succeed."""
+    """
+    Choose the cheapest eligible executor that should succeed.
+
+    `fallback` in the result says why `selected` differs from `proposed`, or is
+    None when Jev's proposal was taken. `trace_meta` is stored with the trace
+    (hooks pass `tool_use_id`) so the subagent's outcome can be joined to it.
+    """
     eligible = {
         k: v for k, v in catalog.items()
         if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
     }
     if not eligible:
-        decision = {"selected": "human", "reason": "no eligible model", "source": "policy"}
-        write_trace("model_router", {"task": task}, decision)
+        decision = {"selected": "human", "reason": "no eligible model", "source": "policy",
+                    "fallback": "no_eligible_model"}
+        write_trace("model_router", {"task": task}, decision, meta=trace_meta)
         return decision
 
     criteria = {k: v["fit"] for k, v in eligible.items()}
@@ -175,7 +147,7 @@ def route_model(
         "objective": "lowest total cost that still passes acceptance",
     }
     result = decide(state, {
-        "model": Choice(instructions="Which eligible model is the cheapest sufficient route?",
+        "model": Choice(instructions="Which eligible model is the cheapest sufficient route?" + UNTRUSTED,
                         criteria=criteria),
         "complexity": Score(instructions="Complexity of the complete task",
                             criteria=["mechanical", "standard", "multi-step", "frontier"]),
@@ -199,10 +171,14 @@ def route_model(
     ):
         threshold = min(min_confidence, MECHANICAL_CONFIDENCE)
 
-    selected = (proposed if answer.certainty >= threshold
-                else _fallback(answer.probabilities, ordinary, strongest))
+    fallback = None
+    if answer.certainty >= threshold:
+        selected = proposed
+    else:
+        selected = _fallback(answer.probabilities, ordinary, strongest)
+        fallback = "low_confidence"
     if selected not in eligible and selected != "human":
-        selected = strongest
+        selected, fallback = strongest, "not_eligible"
 
     decision = {
         "selected": selected,
@@ -212,8 +188,12 @@ def route_model(
         "complexity": complexity,
         "probabilities": answer.probabilities,
         "source": "model",
+        "fallback": fallback,
+        "latency_ms": getattr(result, "latency_ms", None),
+        "input_tokens": getattr(result, "input_tokens", None),
+        "output_tokens": getattr(result, "output_tokens", None),
     }
-    write_trace("model_router", state, decision)
+    write_trace("model_router", state, decision, meta=trace_meta)
     return decision
 
 

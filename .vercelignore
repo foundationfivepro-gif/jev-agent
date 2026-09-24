@@ -12,12 +12,9 @@ __pycache__/
 .mypy_cache/
 .venv/
 venv/
-.codex/
 .claude/
-.cursor/
 .vercel/
 *.bak-*
 bench.py
 install.sh
-install_cursor.py
 hooks.py

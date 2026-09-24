@@ -1,8 +1,7 @@
 """
-jev-agent as an MCP server — one deployment for Claude Code and OpenAI Codex.
+jev-agent as an MCP server for Claude Code.
 
-Both clients speak MCP over stdio, so the same server registers in either. The
-tools here are the decision layer; they never edit files and never run commands.
+The tools here are the decision layer; they never edit files and never run commands.
 They tell the calling agent what to read, what is safe, and where data may go.
 
 The tool that matters for cost is `jev_select_context`. Call it BEFORE reading
@@ -12,14 +11,11 @@ about a tenth of a cent. Everything else is safety and correctness.
 Run:
     AI_GATEWAY_API_KEY=... python mcp_server.py
 
-Register (Claude Code):
+Register:
     claude mcp add jev -- python3 /abs/path/to/mcp_server.py
 
-Register (Codex) in ~/.codex/config.toml:
-    [mcp_servers.jev]
-    command = "python3"
-    args = ["/abs/path/to/mcp_server.py"]
-    env = { AI_GATEWAY_API_KEY = "vck_..." }
+Every tool description here is loaded into Claude's context, so each one is
+written to be as short as it can be while still saying when to call the tool.
 """
 
 from __future__ import annotations
@@ -38,7 +34,7 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
-from model_router import CATALOGS, catalog_for, route_model  # noqa: E402
+from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
@@ -46,11 +42,10 @@ from symbols import extract as extract_symbols  # noqa: E402
 mcp = MCPServer(
     "jev",
     instructions=(
-        "Decision layer backed by the Jev evaluation model. Call jev_select_context "
-        "BEFORE reading a repository's files — it is the difference between loading "
-        "200k tokens and loading 4k. Call jev_gate_command before running any shell "
-        "command, and jev_classify_data before sending file contents to a third party. "
-        "These tools decide; they never read, write or execute anything themselves."
+        "Call jev_select_context BEFORE reading a repository's files (200k tokens -> 4k). "
+        "Call jev_classify_data before sending file contents to a third party. Shell "
+        "commands and subagent spawns are gated and routed by hooks; call jev_gate_command "
+        "or jev_route_model yourself only where no hook runs. These tools never act."
     ),
 )
 
@@ -66,10 +61,8 @@ def _require_key() -> None:
     if not active_transport():
         raise ValueError(
             "AI_GATEWAY_API_KEY is not set for this server process. Add it to the "
-            "server's env in your MCP config (Claude Code: `claude mcp add jev "
-            "--env AI_GATEWAY_API_KEY=... -- python3 mcp_server.py`; Codex: an "
-            "`env = { AI_GATEWAY_API_KEY = \"...\" }` key in the [mcp_servers.jev] "
-            "table of ~/.codex/config.toml)."
+            "server's env: `claude mcp add jev --env AI_GATEWAY_API_KEY=... -- "
+            "python3 mcp_server.py`."
         )
 
 
@@ -169,8 +162,7 @@ class ModelRouteDecision(BaseModel):
     """Which executor model to hand a task to."""
 
     selected: str = Field(description=(
-        "Catalog key to pass as the subagent's model — Claude Code: haiku, sonnet, opus, "
-        "fable; Codex: gpt-5.6-luna, gpt-5.6-terra, gpt-5.6-sol, gpt-6-astra — or 'human' "
+        "Pass as the Agent tool's model: haiku, sonnet, opus, fable — or 'human' "
         "when none should attempt it unaided."
     ))
     model_id: str | None = Field(description="API model id for `selected`; null for 'human'.")
@@ -209,18 +201,9 @@ def jev_select_context(
     ))] = 40000,
 ) -> ContextSelection:
     """
-    Choose which files to read for a goal, before reading any of them.
-
-    Call this FIRST when working in an unfamiliar repository. It scores every
-    candidate on path and exported symbols — never full contents — then sorts
-    them into three tiers: read in full, note the location only, or ignore.
-
-    Measured on 188 files: 195,103 candidate tokens reduced to 3,947 read, for
-    roughly a tenth of a cent. Reading the whole repository to find three
-    relevant files is the single largest avoidable cost in agent work.
-
-    Do not read anything in `index` — that tier exists so you know a file exists
-    and what it exports without spending the tokens to load it.
+    Choose which files to read for a goal, before reading any. Call FIRST in an
+    unfamiliar repository: scores paths and exported symbols (never contents) into
+    read-in-full, index and ignore (188 files: 195k tokens -> 4k). Never read `index`.
     """
     _require_key()
     base = Path(root).expanduser().resolve()
@@ -274,17 +257,9 @@ def jev_gate_command(
     cwd: Annotated[str, Field(default=".", description="Working directory it would run in.")] = ".",
 ) -> CommandDecision:
     """
-    Decide whether a shell command is safe to run, before running it.
-
-    Returns allow, review or block. **Do not execute anything that comes back
-    review or block** — surface it to the human instead.
-
-    A deterministic policy runs first and cannot be overridden: it resolves
-    absolute paths, follows wrappers like sudo and env, recurses into `sh -c`,
-    and splits pipelines, so `/bin/rm -rf /` and `bash -c 'rm -rf /'` are caught
-    as readily as `rm -rf /`. Jev then judges whatever survives, and an allow is
-    downgraded when the probability mass on a destructive outcome is non-trivial,
-    the blast radius is broad, or the model itself asks for a human.
+    Whether a shell command is safe: allow, review or block. The Bash hook already
+    runs this on every command; call it only where no hook runs. Never execute
+    review or block. Deterministic rules (rm -rf, sh -c, sudo) run first.
     """
     if not command.strip():
         raise ValueError("command is empty")
@@ -326,16 +301,8 @@ def jev_classify_data(
     ))] = "",
 ) -> DataClassification:
     """
-    Classify how sensitive some material is, and which providers may see it.
-
-    Runs entirely in local deterministic code — no model call, no network — so it
-    is safe to use on material you have not decided you can share yet. Detects
-    PEM and OpenSSH key armour, provider key prefixes, JWTs, connection strings
-    with passwords, credential assignments and high-entropy blobs, and fails
-    closed on anything credential-shaped.
-
-    Call this before pasting file contents into a third-party service. A `secret`
-    label means stop, not proceed carefully.
+    Sensitivity of material and which providers may see it. Local, no model call.
+    Call before sending file contents to a third party. `secret` means stop.
     """
     label, reasons = classify(paths, content)
     name = LABEL_NAMES[label]
@@ -371,16 +338,9 @@ def jev_evaluate(
     ))],
 ) -> Evaluation:
     """
-    Ask Jev arbitrary typed questions — the escape hatch for decisions the other
-    tools do not cover.
-
-    Good for: routing among options, rubric scoring, classification, verifying
-    that a summary retained specific facts, deciding whether a check is worth
-    running. Bad for: anything needing prose, exact arithmetic, or a judgement
-    the caller could make deterministically in code.
-
-    Booleans return a probability, not a verdict. Pick the threshold yourself
-    based on what being wrong costs.
+    Arbitrary typed questions to Jev (boolean, choice, score) for decisions no other
+    tool covers. Not for prose or exact arithmetic. Booleans return a probability;
+    choose the threshold by what being wrong costs.
     """
     _require_key()
     if not questions:
@@ -428,12 +388,8 @@ def jev_file_outline(
     paths: Annotated[list[str], Field(description="Absolute or relative file paths.")],
 ) -> dict[str, str]:
     """
-    Exported symbols for files, without reading their contents into context.
-
-    Pure local parsing — `ast` for Python, ast-grep for TypeScript and
-    JavaScript — so it costs nothing and calls no model. Use it to decide whether
-    a file is worth opening, or to answer "what does this module expose" without
-    loading the module.
+    Exported symbols of files without loading them. Local, no model call. Use to
+    decide whether a file is worth opening.
     """
     out: dict[str, str] = {}
     for raw in paths:
@@ -467,17 +423,8 @@ def jev_should_run(
     ))] = None,
 ) -> ScheduledRunDecision:
     """
-    Decide whether a scheduled automation needs to run this time, before running it.
-
-    For recurring jobs — a nightly ingest, a weekly report pull — most executions
-    find nothing worth the pipeline. This costs a fraction of a cent and skips
-    the rest. Where `jev_select_context` saves tokens within a task, this avoids
-    the task entirely, which matters more at high frequency.
-
-    Fails **open**: when uncertain it returns proceed, because skipping a run
-    that mattered loses data silently while running a redundant one only costs
-    tokens. `escalate` means the signals look anomalous enough that a person
-    should look before automation acts — treat it as a stop, not a slow proceed.
+    Whether a scheduled automation needs to run this time. Fails open (proceed when
+    unsure). `escalate` means anomalous signals: stop and ask a person.
     """
     _require_key()
     from harness import should_run
@@ -509,16 +456,9 @@ def jev_check_action(
     ))] = [],
 ) -> ActionPolicyDecision:
     """
-    Judge a proposed action against allow/block policy written in plain English.
-
-    Use before acting on anything with external effect — posting, emailing,
-    paying, deleting. This generalises a hand-maintained list of permitted
-    phrasings: a literal list only fires on wording someone anticipated, while
-    the same sentences used as criteria let adjacent cases resolve correctly.
-
-    Fails **closed**. Anything not covered by either list comes back `review`,
-    never a silent allow, and an otherwise-allowed action that looks hard to
-    undo is also sent to review. Do not act on `block` or `review`.
+    Judge an action with external effect (post, email, pay, delete) against
+    plain-English allow/block policy. Fails closed: unlisted or hard-to-undo goes
+    to review. Do not act on block or review.
     """
     _require_key()
     from harness import check_action
@@ -545,51 +485,25 @@ def jev_route_model(
         "The complete subtask you are about to delegate, in one or two sentences. "
         "Include what must come back — the route depends on it."
     ))],
-    needs_browser: Annotated[bool, Field(default=False, description=(
-        "Whether the executor must drive a browser. Only matters for catalogs that "
-        "mark some models browser-incapable."
-    ))] = False,
-    max_cost_in: Annotated[float, Field(default=1e9, description=(
-        "Exclude models whose input price per million tokens exceeds this."
-    ))] = 1e9,
-    preset: Annotated[str | None, Field(default=None, description=(
-        "Which built-in catalog: 'claude' (haiku, sonnet, opus, fable) or 'codex' "
-        "(gpt-5.6-luna, -terra, -sol, gpt-6-astra). Omit to use $JEV_CATALOG, else claude."
-    ))] = None,
     catalog: Annotated[dict | None, Field(default=None, description=(
-        "Full override: {name: {fit, cost_in, cost_out, tier, id?, escalation_only?}}. "
-        "Wins over preset."
+        "Override: {name: {fit, cost_in, cost_out, tier, id?, escalation_only?}}."
     ))] = None,
 ) -> ModelRouteDecision:
     """
-    Pick the cheapest model that should pass, before spawning a subagent.
+    Cheapest model that should pass a subtask. The Agent hook already does this
+    for every spawn without an explicit model; call it only where no hook runs.
 
-    Pass `selected` straight to the subagent's model parameter. The catalog is
-    ordered by price and its top tier (Fable for Claude, Astra for Codex) is
-    escalation-only: twice the next tier per token, or fifty times the bottom.
-
-    Fails toward capability: below 75% confidence the strongest ordinary tier
-    that Jev gave at least 20% weight is returned (a sonnet/haiku split stays on
-    Sonnet; weight on Opus, Fable or human means Opus), because a cheap failure
-    costs the cheap attempt plus the expensive retry plus the latency of noticing. The one exception is a
-    mechanical task (complexity under 0.5), where a cheap-tier proposal is
-    accepted from 50% — a Haiku retry on a one-line edit is nearly free. Fable
-    is escalation-only: it comes back when Jev proposes it with confidence for
-    frontier-complexity architecture or design, never as the fallback for an
-    uncertain route. `human` means do not delegate.
-
-    This decides *which* model; whether to delegate at all is a separate
-    question answered by compression ratio, not difficulty — a subagent that
-    reads a lot and returns a few sentences pays, one whose full output you must
-    re-read does not. See the delegation-economics skill.
+    Pass `selected` as the model. Below 75% confidence it returns the strongest
+    tier Jev gave 20% weight (mechanical tasks: cheap tier accepted from 50%).
+    Fable is escalation-only, never a fallback. `human` means do not delegate.
     """
     _require_key()
     if not task.strip():
         raise ValueError("task is empty")
 
-    cat = catalog or catalog_for(preset)
+    cat = catalog or DEFAULT_CATALOG
     try:
-        d = route_model(task, catalog=cat, needs_browser=needs_browser, max_cost_in=max_cost_in)
+        d = route_model(task, catalog=cat, max_cost_in=max_cost_in)
     except TransportError as exc:
         raise ValueError(f"Jev unreachable: {exc}") from exc
 

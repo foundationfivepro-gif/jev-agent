@@ -68,7 +68,7 @@ from starlette.responses import JSONResponse, PlainTextResponse  # noqa: E402
 from starlette.routing import Route  # noqa: E402
 
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
-from model_router import catalog_for, route_model  # noqa: E402
+from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 
@@ -306,17 +306,12 @@ def jev_route_model(
     max_cost_in: Annotated[float, Field(default=1e9, description=(
         "Exclude models whose input price per million tokens exceeds this."
     ))] = 1e9,
-    preset: Annotated[str | None, Field(default=None, description=(
-        "'claude' (haiku, sonnet, opus, fable) or 'codex' (gpt-5.6-luna, -terra, -sol, "
-        "gpt-6-astra). Omit for the server default."
-    ))] = None,
 ) -> ModelRouteDecision:
     """
     Pick the cheapest model that should pass a task.
 
-    Claude catalog, USD per million tokens: haiku 1/5, sonnet 2/10, opus 5/25,
-    fable 10/50. Codex: luna 0.2/1.2, terra 2/12, sol 4/20, astra 10/50, with
-    the same escalation-only rule on the top tier. Fails toward capability — below 75% confidence the
+    USD per million tokens: haiku 1/5, sonnet 2/10, opus 5/25, fable 10/50.
+    Fails toward capability — below 75% confidence the
     strongest ordinary tier Jev gave at least 20% weight is returned (weight on Opus, Fable or human
     means Opus), except on mechanical tasks (complexity under 0.5) where a cheap
     tier is accepted from 50% — and Fable is escalation-only: it comes back
@@ -327,7 +322,7 @@ def jev_route_model(
     _require_key()
     if not task.strip():
         raise ValueError("task is empty")
-    cat = catalog_for(preset)
+    cat = DEFAULT_CATALOG
     try:
         d = route_model(task, catalog=cat, max_cost_in=max_cost_in)
     except TransportError as exc:

@@ -1,56 +1,33 @@
 #!/usr/bin/env bash
-# Install jev-agent for Claude Code and/or OpenAI Codex.
+# Install jev-agent for Claude Code.
 #
-# Two separate things get installed, and they behave differently:
+#   skills      SKILL.md files -> ~/.claude/skills. Only their frontmatter loads
+#               until a description matches, so they cost almost nothing idle.
 #
-#   skills      Markdown files. Same SKILL.md format in both clients, so the same
-#               files serve Claude Code (~/.claude/skills) and Codex
-#               (~/.agents/skills). They load when their description matches the
-#               task. No key, no process, no cost until they load.
+#   hooks       hooks.py into ~/.claude/settings.json: the command gate, the
+#               subagent router and return contract, the per-prompt note and the
+#               outcome recorder run on every event. Also places the defaults
+#               policy (CLAUDE.md) in ~/.claude/CLAUDE.md; the two go together.
 #
-#   MCP server  A local stdio process exposing the decision tools. Needs
-#               AI_GATEWAY_API_KEY and a Python environment. This is the part
-#               that produces the token saving, because jev_select_context runs
-#               before the agent reads files.
-#
-#   hooks       Claude Code hooks (hooks.py) so the gate, the model router and
-#               a per-prompt evaluation run on every event without the agent
-#               having to remember. Also places the defaults policy (CLAUDE.md)
-#               in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md, and registers
-#               the server in ~/.codex/config.toml when Codex is present.
+#   MCP server  The decision tools, chiefly jev_select_context, which runs
+#               before Claude reads files. Needs AI_GATEWAY_API_KEY.
 #
 # Usage:
-#   ./install.sh skills           # skills -> Claude Code + Codex
-#   ./install.sh hooks            # Claude Code hooks + global policy + Codex registration
-#   ./install.sh mcp              # print MCP registration for Claude Code + Codex
-#   ./install.sh cursor REPO      # Cursor: convert skills to .mdc + merge mcp.json
-#   ./install.sh all              # skills + hooks + mcp (Cursor is separate; see above)
-#
-# Cursor is handled by install_cursor.py because it differs twice: it does not
-# read SKILL.md (its rules are .cursor/rules/*.mdc), and those rules are
-# PROJECT-scoped rather than global, so they install per repository.
+#   ./install.sh skills | hooks | mcp | all
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-all}"
 
 install_skills() {
-  local installed=0
-  for target in "$HOME/.claude/skills:Claude Code" "$HOME/.agents/skills:Codex"; do
-    dir="${target%%:*}"; label="${target##*:}"
-    mkdir -p "$dir"
-    for skill in "$HERE"/skills/*/; do
-      name="$(basename "$skill")"
-      rm -rf "${dir:?}/$name"
-      cp -R "$skill" "$dir/$name"
-    done
-    echo "  installed $(ls -1 "$HERE"/skills | wc -l | tr -d ' ') skills -> $dir  ($label)"
-    installed=1
+  local dir="$HOME/.claude/skills"
+  mkdir -p "$dir"
+  for skill in "$HERE"/skills/*/; do
+    name="$(basename "$skill")"
+    rm -rf "${dir:?}/$name"
+    cp -R "$skill" "$dir/$name"
   done
-  [ "$installed" = 1 ] || echo "  no skills installed"
-  echo
-  echo "  Claude Code picks these up in any repo. Codex finds them at USER scope;"
-  echo "  invoke explicitly with \$jev-evaluation or let the description match."
+  echo "  installed $(ls -1 "$HERE"/skills | wc -l | tr -d ' ') skills -> $dir"
   echo
   echo "  NOTE: these are the CLI/desktop copies. Skills saved to your Claude"
   echo "  account (via the app) are what sync to mobile — files on disk do not."
@@ -67,18 +44,6 @@ print_mcp() {
         --env AI_GATEWAY_API_KEY=\$AI_GATEWAY_API_KEY \\
         -- $py "$HERE/mcp_server.py"
 
-  Codex — append to ~/.codex/config.toml:
-
-      [mcp_servers.jev]
-      command = "$py"
-      args = ["$HERE/mcp_server.py"]
-      env = { AI_GATEWAY_API_KEY = "vck_..." }
-      startup_timeout_sec = 30
-
-  or:
-      codex mcp add jev -- $py "$HERE/mcp_server.py"
-      # then add the env key to the generated table
-
   Verify:
       AI_GATEWAY_API_KEY=... $py "$HERE/mcp_server.py"   # should sit waiting on stdio
 
@@ -87,19 +52,6 @@ EOF
 }
 
 case "$MODE" in
-  cursor)
-    shift || true
-    repo="${1:-}"
-    if [ -z "$repo" ]; then
-      echo "usage: $0 cursor /path/to/repo   (Cursor rules are project-scoped)" >&2
-      echo "       $0 cursor --mcp-only      (server only, no rules)" >&2
-      exit 1
-    fi
-    if [ "$repo" = "--mcp-only" ]; then
-      exec python3 "$HERE/install_cursor.py" --mcp-only
-    fi
-    exec python3 "$HERE/install_cursor.py" --repo "$repo"
-    ;;
   skills) echo "Installing skills..."; install_skills ;;
   hooks)  echo "Installing hooks..."; python3 "$HERE/hooks.py" install ;;
   mcp)    echo "MCP registration:"; echo; print_mcp ;;
@@ -108,5 +60,5 @@ case "$MODE" in
     echo "Installing hooks..."; python3 "$HERE/hooks.py" install; echo
     echo "MCP registration:"; echo; print_mcp
     ;;
-  *) echo "usage: $0 [skills|hooks|mcp|cursor REPO|all]" >&2; exit 1 ;;
+  *) echo "usage: $0 [skills|hooks|mcp|all]" >&2; exit 1 ;;
 esac

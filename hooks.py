@@ -9,13 +9,22 @@ applies to every prompt and every command in every session, not only inside
 repositories whose CLAUDE.md says so.
 
     event                     subcommand    what it does
-    UserPromptSubmit          prompt        one Jev call per prompt: complexity and
-                                            whether repository context is needed,
-                                            injected as a one-line note
+    SessionStart              session       announces HOOKS_ACTIVE, so the policy (and
+                                            any account-wide preference) can tell a
+                                            hooked session from one with no hooks,
+                                            such as Cowork. Local; no call.
+    UserPromptSubmit          prompt        one Jev call per prompt; a one-line note
+                                            only when repository context is needed
     PreToolUse   Bash         gate-bash     jev_gate_command as a hook. The hard
                                             block is deterministic and needs no key.
-    PreToolUse   Agent|Task   route-agent   jev_route_model as a hook. Sets `model`
-                                            on a subagent that did not choose one.
+    PreToolUse   Agent|Task   route-agent   appends RETURN_CONTRACT to every subagent
+                                            prompt (local), and sets `model` via
+                                            jev_route_model when none was chosen.
+    PostToolUse(Failure)      agent-outcome records how that subagent ended, keyed by
+                 Agent|Task                 tool_use_id, so a route can be judged by
+                                            what it produced. Local; no key, no call.
+
+    python3 hooks.py report               # routes, fallbacks and outcomes so far
 
 Each subcommand reads Claude Code's hook JSON on stdin and writes hook JSON on
 stdout. Silence means "no opinion" and the ordinary permission flow continues.
@@ -35,15 +44,7 @@ What leaves the machine: the prompt text (first MAX_TASK_CHARS) and the command
 line go to Jev through the gateway. Anything credential-shaped is held back
 and turned into `ask` without being sent.
 
-Codex speaks the same hook contract — the same JSON in, the same JSON out, exit
-2 to block — so these subcommands serve it unchanged. Only the wiring differs:
-`~/.codex/hooks.json`, commands as shell strings, and JEV_CATALOG=codex so the
-router answers with Codex model ids. Codex's docs do not name the tool that
-spawns a subagent, so there is no route-agent hook for it; AGENTS.md tells the
-agent to call jev_route_model and pass `selected` on the spawn instead.
-
-    python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md,
-                                          # ~/.codex/{AGENTS.md,config.toml,hooks.json}
+    python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md
     python3 hooks.py install --dry-run
     echo '{"tool_input":{"command":"rm -rf /"}}' | python3 hooks.py gate-bash
 
@@ -70,10 +71,23 @@ os.environ.setdefault("JEV_TRACE_DIR", str(Path.home() / ".jev" / "traces"))
 
 MARK_BEGIN = "<!-- jev-agent:begin -->"
 MARK_END = "<!-- jev-agent:end -->"
-CODEX_MARK = "# jev-agent: registered by hooks.py install"
 MAX_TASK_CHARS = 4000
 HOOK_BUDGET_S = 20          # below Claude Code's 30s hook timeout, with margin
 COMPLEXITY = ("mechanical", "standard", "multi-step", "frontier")
+
+# The one signal that gating and routing are enforced here. Rules that apply on
+# every surface (a claude.ai preference also reaches Cowork) key off this line
+# instead of assuming hooks exist, so a hooked session never pays twice and an
+# unhooked one never goes ungated.
+HOOKS_ACTIVE = "jev hooks active"
+
+# Appended to every subagent prompt. The marker makes it idempotent.
+RETURN_MARK = "[jev return contract]"
+RETURN_CONTRACT = (
+    f"\n\n{RETURN_MARK} Reply with the conclusion only: findings, decision or change "
+    "made, with file:line references. No file dumps, logs or restated task. Under 250 "
+    "words unless the task above sets its own format."
+)
 
 # `rm` targeting root, home or a bare wildcard is the one deletion that earns a
 # hard deny. Every other rm is `ask`: the user sees it and decides.
@@ -196,22 +210,54 @@ def gate_bash(data: dict) -> None:
     # allow: say nothing. A hook "allow" would bypass the user's own permission rules.
 
 
+def _with_contract(tool_input: dict) -> dict | None:
+    """The subagent's input with RETURN_CONTRACT appended, or None if it already has it."""
+    text = tool_input.get("prompt")
+    if not isinstance(text, str) or not text.strip() or RETURN_MARK in text:
+        return None
+    return {**tool_input, "prompt": text.rstrip() + RETURN_CONTRACT}
+
+
 def route_agent(data: dict) -> None:
-    tool_input = dict(data.get("tool_input") or {})
-    if tool_input.get("model"):
-        return  # an explicit choice is respected
-    task = str(tool_input.get("prompt") or tool_input.get("description") or "").strip()
+    """
+    Two jobs on every spawn. The first needs no key and no call.
+
+    1. Append RETURN_CONTRACT to the subagent's prompt. Whatever a subagent
+       returns is read by the parent at the parent's price and stays in its
+       context for the rest of the session, so a short return is where
+       delegation's saving is actually made or lost.
+    2. If no model was chosen, route one with jev_route_model.
+    """
+    original = dict(data.get("tool_input") or {})
+    tool_input = _with_contract(original) or original
+    changed = tool_input is not original
+
+    def contract_only(why: str) -> None:
+        if changed:
+            _emit(_pre_tool("allow", f"jev: return contract added ({why})", tool_input))
+
+    if original.get("model"):
+        contract_only("explicit model kept")
+        return
+    task = str(original.get("prompt") or original.get("description") or "").strip()
     if not task or _looks_secret(task) or not _have_key():
+        contract_only("not routed")
         return
 
-    from core import TransportError
-    from model_router import catalog_for, route_model
+    from core import InvalidResponse, TransportError, write_trace
+    from model_router import DEFAULT_CATALOG as cat, route_model
 
-    cat = catalog_for()
+    meta = _join_keys(data)
     try:
-        d = route_model(task[:MAX_TASK_CHARS], catalog=cat)
+        d = route_model(task[:MAX_TASK_CHARS], catalog=cat, trace_meta=meta)
     except TransportError as exc:
-        print(f"jev route-agent: unreachable ({exc}); leaving model unset", file=sys.stderr)
+        # Recorded, so an outage or a malformed answer shows up in `report`
+        # instead of looking like a subagent that simply was not routed.
+        reason = "invalid_response" if isinstance(exc, InvalidResponse) else "transport_error"
+        write_trace("model_router", {"task": task[:MAX_TASK_CHARS]},
+                    {"selected": None, "fallback": reason, "error": str(exc)[:300]}, meta=meta)
+        print(f"jev route-agent: {reason} ({exc}); leaving model unset", file=sys.stderr)
+        contract_only("Jev unavailable")
         return
 
     selected = d["selected"]
@@ -219,6 +265,7 @@ def route_agent(data: dict) -> None:
         _emit(_pre_tool("ask", "jev_route_model: no model should attempt this unaided"))
         return
     if selected not in cat:
+        contract_only("no route")
         return
     confidence = d.get("confidence")
     reason = (
@@ -229,6 +276,85 @@ def route_agent(data: dict) -> None:
     _emit(_pre_tool("allow", reason, {**tool_input, "model": selected}))
 
 
+def _join_keys(data: dict) -> dict:
+    return {k: str(data[k]) for k in ("tool_use_id", "session_id") if data.get(k)}
+
+
+def agent_outcome(data: dict) -> None:
+    """
+    Record how a subagent ended. Runs on PostToolUse and PostToolUseFailure.
+
+    This is the half a routing decision cannot supply for itself: whether the
+    model it chose came back with a result or an error. Only shape is stored —
+    status, length, the model that ran — never the subagent's output, which is
+    as sensitive as anything it read. Says nothing to Claude Code.
+    """
+    meta = _join_keys(data)
+    if not meta.get("tool_use_id"):
+        return
+    from core import write_trace
+
+    tool_input = data.get("tool_input") or {}
+    response = data.get("tool_response")
+    failed = data.get("hook_event_name") == "PostToolUseFailure" or bool(data.get("error"))
+    if isinstance(response, dict) and response.get("is_error"):
+        failed = True
+    text = response if isinstance(response, str) else json.dumps(response, default=str) if response else ""
+    write_trace("model_router_outcome", meta, None, {
+        "status": "error" if failed else "ok",
+        "model": tool_input.get("model"),
+        "response_chars": len(text),
+    }, meta=meta)
+
+
+def report(trace_dir: Path | None = None) -> dict:
+    """Join routing decisions to subagent outcomes. Read-only; prints nothing itself."""
+    from collections import Counter
+
+    root = Path(trace_dir or os.environ["JEV_TRACE_DIR"])
+    routes: dict[str, dict] = {}
+    outcomes: dict[str, dict] = {}
+    unjoined = 0
+    for path in sorted(root.glob("model_router*.json")) if root.is_dir() else []:
+        try:
+            t = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        key = (t.get("meta") or {}).get("tool_use_id")
+        if t.get("system") == "model_router_outcome":
+            if key:
+                outcomes[key] = t.get("result") or {}
+        elif key:
+            routes[key] = t.get("decision") or {}
+        else:
+            unjoined += 1
+
+    by_model: dict[str, Counter] = {}
+    fallbacks: Counter = Counter()
+    for key, d in routes.items():
+        fallbacks[d.get("fallback") or "accepted"] += 1
+        model = str(d.get("selected"))
+        status = (outcomes.get(key) or {}).get("status", "no_outcome")
+        by_model.setdefault(model, Counter())[status] += 1
+    explicit = sum(1 for k in outcomes if k not in routes)
+    latencies = sorted(d["latency_ms"] for d in routes.values() if d.get("latency_ms") is not None)
+    return {
+        "routed": len(routes),
+        "fallbacks": dict(fallbacks),
+        "outcomes_by_selected_model": {m: dict(c) for m, c in sorted(by_model.items())},
+        "subagents_not_routed_by_jev": explicit,
+        "decisions_without_tool_use_id": unjoined,
+        "median_latency_ms": latencies[len(latencies) // 2] if latencies else None,
+    }
+
+
+def session(data: dict) -> None:
+    """SessionStart (startup, resume, clear, compact): say, in one line, what the hooks enforce."""
+    routing = "subagents routed" if _have_key() else "routing off (no key)"
+    note = f"{HOOKS_ACTIVE}: Bash gated, {routing}, subagent return contract on."
+    _emit({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": note}})
+
+
 def prompt(data: dict) -> None:
     text = data.get("prompt")
     if not isinstance(text, str):
@@ -237,12 +363,12 @@ def prompt(data: dict) -> None:
     if len(text) < 20 or _looks_secret(text) or not _have_key():
         return
 
-    from core import Noul, Score, TransportError, decide
+    from core import UNTRUSTED, Noul, Score, TransportError, decide
 
     try:
         r = decide({"prompt": text[:MAX_TASK_CHARS]}, {
             "complexity": Score(
-                instructions="Complexity of completing state.prompt as a coding task",
+                instructions="Complexity of completing state.prompt as a coding task" + UNTRUSTED,
                 criteria=list(COMPLEXITY),
             ),
             "repo": Noul(
@@ -253,15 +379,13 @@ def prompt(data: dict) -> None:
     except TransportError:
         return
 
-    c = float(r.value("complexity"))
-    needs_repo = float(r.answers["repo"].value) >= 0.5
-    label = COMPLEXITY[max(0, min(3, round(c)))]
-    note = (
-        f"jev: complexity {label} ({c:.1f}/3); repository context "
-        f"{'likely' if needs_repo else 'unlikely'} needed"
-        + (" — call jev_select_context before reading files." if needs_repo else ".")
-        + " Route subagents with jev_route_model; shell is gated by jev_gate_command."
-    )
+    # Injected text stays in context for the rest of the session, so the note
+    # is sent only when it changes what Claude does next: read files through
+    # jev_select_context rather than one by one.
+    if float(r.answers["repo"].value) < 0.5:
+        return
+    label = COMPLEXITY[max(0, min(3, round(float(r.value("complexity")))))]
+    note = f"jev: {label} task; call jev_select_context before reading files."
     _emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": note}})
 
 
@@ -292,23 +416,6 @@ def _merge_hooks(existing: dict, ours: dict, hooks_path: str) -> dict:
     for event, groups in ours.items():
         hooks.setdefault(event, []).extend(groups)
     return existing
-
-
-def _codex_env_line(text: str, key: str, value: str) -> str:
-    """Add key = "value" to the inline env table of [mcp_servers.jev] if absent."""
-    start = text.find("[mcp_servers.jev]")
-    if start == -1:
-        return text
-    end = text.find("\n[", start + 1)
-    section = text[start:] if end == -1 else text[start:end]
-    if f"{key} =" in section:
-        return text
-    patched = re.sub(
-        r'(env\s*=\s*\{)(.*?)(\})',
-        lambda m: f'{m.group(1)}{m.group(2).rstrip()}, {key} = "{value}" {m.group(3)}',
-        section, count=1, flags=re.DOTALL,
-    )
-    return text[:start] + patched + ("" if end == -1 else text[end:])
 
 
 def _place_block(text: str, block: str) -> str:
@@ -342,10 +449,17 @@ def install(args: argparse.Namespace) -> None:
                 "timeout": 30, "statusMessage": msg}
 
     ours = {
+        "SessionStart": [{"hooks": [entry("session", "jev: hooks active")]}],
         "UserPromptSubmit": [{"hooks": [entry("prompt", "jev: evaluating prompt")]}],
         "PreToolUse": [
             {"matcher": "Bash", "hooks": [entry("gate-bash", "jev: gating command")]},
             {"matcher": "Agent|Task", "hooks": [entry("route-agent", "jev: routing subagent")]},
+        ],
+        "PostToolUse": [
+            {"matcher": "Agent|Task", "hooks": [entry("agent-outcome", "jev: recording outcome")]},
+        ],
+        "PostToolUseFailure": [
+            {"matcher": "Agent|Task", "hooks": [entry("agent-outcome", "jev: recording outcome")]},
         ],
     }
 
@@ -363,91 +477,33 @@ def install(args: argparse.Namespace) -> None:
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     print(f"hooks    — {verb} {settings}" + (f"  (backup {backup.name})" if backup else ""))
-    print("             UserPromptSubmit -> prompt, PreToolUse Bash -> gate-bash, "
-          "PreToolUse Agent|Task -> route-agent")
+    print("             SessionStart -> session, UserPromptSubmit -> prompt, PreToolUse Bash -> gate-bash, "
+          "PreToolUse Agent|Task -> route-agent, PostToolUse(Failure) Agent|Task -> agent-outcome")
 
-    # Policy block: Claude Code global memory and Codex global instructions.
+    # Policy block: Claude Code global memory. Installed with the hooks because
+    # the policy tells Claude the hooks exist; one without the other would lie.
     policy = (HERE / "CLAUDE.md").read_text(encoding="utf-8").strip()
     block = f"{MARK_BEGIN}\n{policy}\n{MARK_END}"
-    for target in (home / ".claude" / "CLAUDE.md", home / ".codex" / "AGENTS.md"):
-        if target.name == "AGENTS.md" and not target.parent.is_dir():
-            print(f"policy   — skipped {target} (no Codex install)")
-            continue
-        current = target.read_text(encoding="utf-8") if target.is_file() else ""
-        backup = _backup(target, dry)
-        if not dry:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(_place_block(current, block), encoding="utf-8")
-        print(f"policy   — {verb} {target}" + (f"  (backup {backup.name})" if backup else ""))
-
-    # Codex: MCP registration with the Codex catalog, if Codex is installed.
-    codex_cfg = home / ".codex" / "config.toml"
-    if codex_cfg.is_file():
-        text = codex_cfg.read_text(encoding="utf-8")
-        _load_env()
-        key = os.environ.get("AI_GATEWAY_API_KEY", "")
-        if "[mcp_servers.jev]" in text:
-            patched = _codex_env_line(text, "JEV_CATALOG", "codex")
-            if patched != text:
-                backup = _backup(codex_cfg, dry)
-                if not dry:
-                    codex_cfg.write_text(patched, encoding="utf-8")
-                print(f"codex    — {verb} JEV_CATALOG=codex into [mcp_servers.jev] in {codex_cfg}"
-                      + (f"  (backup {backup.name})" if backup else ""))
-            else:
-                print(f"codex    — {codex_cfg} already registers jev with the codex catalog")
-        else:
-            table = (
-                f"\n{CODEX_MARK}\n[mcp_servers.jev]\ncommand = \"{py}\"\n"
-                f"args = [\"{HERE / 'mcp_server.py'}\"]\n"
-                f"env = {{ AI_GATEWAY_API_KEY = \"{key}\", JEV_CATALOG = \"codex\" }}\n"
-                f"startup_timeout_sec = 30\n"
-            )
-            backup = _backup(codex_cfg, dry)
-            if not dry:
-                codex_cfg.write_text(text.rstrip("\n") + "\n" + table, encoding="utf-8")
-            print(f"codex    — {verb} [mcp_servers.jev] into {codex_cfg}"
-                  + (f"  (backup {backup.name})" if backup else "")
-                  + ("" if key else "  (AI_GATEWAY_API_KEY empty: set it in .env and re-run)"))
-
-        # Codex hooks: same contract, shell-string commands, no spawn hook (the
-        # spawn tool is undocumented, so a matcher would be a guess).
-        codex_hooks = home / ".codex" / "hooks.json"
-        existing_codex: dict = {}
-        if codex_hooks.is_file():
-            try:
-                existing_codex = json.loads(codex_hooks.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"{codex_hooks} is not valid JSON ({exc}); refusing to overwrite it.")
-
-        def shell_entry(sub: str, msg: str) -> dict:
-            return {"type": "command", "timeout": 30, "statusMessage": msg,
-                    "command": f'JEV_CATALOG=codex "{py}" "{hooks_path}" {sub}'}
-
-        ours_codex = {
-            "UserPromptSubmit": [{"hooks": [shell_entry("prompt", "jev: evaluating prompt")]}],
-            "PreToolUse": [{"matcher": "^Bash$", "hooks": [shell_entry("gate-bash", "jev: gating command")]}],
-        }
-        merged_codex = _merge_hooks(existing_codex, ours_codex, hooks_path)
-        backup = _backup(codex_hooks, dry)
-        if not dry:
-            codex_hooks.write_text(json.dumps(merged_codex, indent=2) + "\n", encoding="utf-8")
-        print(f"codex    — {verb} {codex_hooks}" + (f"  (backup {backup.name})" if backup else ""))
-        print("             UserPromptSubmit -> prompt, PreToolUse Bash -> gate-bash "
-              "(no spawn hook: Codex does not document the spawn tool name)")
-    else:
-        print("codex    — no ~/.codex/config.toml; skipped MCP registration and hooks")
+    target = home / ".claude" / "CLAUDE.md"
+    current = target.read_text(encoding="utf-8") if target.is_file() else ""
+    backup = _backup(target, dry)
+    if not dry:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_place_block(current, block), encoding="utf-8")
+    print(f"policy   — {verb} {target}" + (f"  (backup {backup.name})" if backup else ""))
 
     print()
     print("Claude Code watches settings files it knew about at startup. If settings.json")
-    print("did not exist when your session began, restart it or open /hooks once. Codex")
-    print("reads AGENTS.md, config.toml and hooks.json on its next start.")
+    print("did not exist when your session began, restart it or open /hooks once.")
 
 
 # ---------------------------------------------------------------------- main
 
-HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent}
+HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent,
+            "agent-outcome": agent_outcome, "session": session}
 FALLBACK = {
+    "agent-outcome": None,
+    "session": None,
     "gate-bash": _pre_tool("ask", f"jev: no answer within {HOOK_BUDGET_S}s; that is not permission to proceed"),
     "route-agent": None,
     "prompt": None,
@@ -462,6 +518,8 @@ def main(argv: list[str] | None = None) -> None:
     ins = sub.add_parser("install")
     ins.add_argument("--home", default="~", help="Home directory to install into (tests).")
     ins.add_argument("--dry-run", action="store_true")
+    rep = sub.add_parser("report")
+    rep.add_argument("--dir", default=None, help="Trace directory (default: $JEV_TRACE_DIR).")
 
     # argparse exits 2 on a usage error, and 2 is Claude Code's blocking code.
     try:
@@ -473,6 +531,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "install":
         install(args)
+        return
+    if args.cmd == "report":
+        print(json.dumps(report(Path(args.dir) if args.dir else None), indent=2))
         return
 
     _arm_budget(FALLBACK[args.cmd])
