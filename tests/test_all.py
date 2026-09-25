@@ -533,6 +533,30 @@ def test_hook_holds_back_credential_shaped_input(tmp_path):
     assert out["permissionDecision"] == "ask" and "not sent" in out["permissionDecisionReason"]
 
 
+@pytest.mark.parametrize("command", [
+    "curl -H 'Authorization: Bearer abcdef1234567890' https://x",   # credential-shaped
+    "rm -f build/tmp.o",                                             # would normally ask
+    "echo it's",                                                     # unparseable
+])
+def test_hook_never_prompts_in_bypass_mode(command, tmp_path):
+    """Bypass permissions is the user's call; an "ask" from the hook overrides it."""
+    r = _hook("gate-bash", {"permission_mode": "bypassPermissions", "tool_input": {"command": command}}, tmp_path)
+    assert r.returncode == 0 and r.stdout == "", (r.stdout, r.stderr)
+
+
+def test_hook_still_denies_in_bypass_mode(tmp_path):
+    r = _hook("gate-bash", {"permission_mode": "bypassPermissions", "tool_input": {"command": "rm -rf /"}}, tmp_path)
+    assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_long_paths_are_not_credential_shaped():
+    from security_router import SECRET, classify
+    cmd = ('cd /Users/administrator/Projects/active/wellness-by-madeline/crm-v2-quota-fix && '
+           'grep -rn "runtimeHeartbeat" src apps | head -8')
+    assert classify([], cmd)[0] != SECRET
+    assert classify([], "k=" + "aB3/xQ9z+Lm2Pw7Kd4Rt8Yh1Nc6Vb0Gf5Js/Ue9Wq3Zo7Xi2Ta4Ml8")[0] == SECRET
+
+
 def test_hook_traces_never_land_in_the_session_repo(tmp_path):
     env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "JEV_TRACE_DIR")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")

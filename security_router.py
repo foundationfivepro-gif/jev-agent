@@ -86,9 +86,22 @@ def _shannon(s: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
+# A filesystem path matches _B64 (it allows "/"), and a long path of ordinary words
+# easily clears the entropy bar: /Users/me/Projects/active/some-app/fix-branch scored
+# 4.36. Every segment of a path is a word; segments of random base64 are not.
+_PATH_WORD = re.compile(r"[A-Z]?[a-z0-9._\-]*")
+
+
+def _looks_like_path(blob: str) -> bool:
+    parts = [p for p in blob.split("/") if p]
+    return blob.count("/") >= 2 and bool(parts) and all(_PATH_WORD.fullmatch(p) for p in parts)
+
+
 def _high_entropy_blob(text: str, *, min_entropy: float = 4.2) -> str | None:
     for m in _B64.finditer(text):
         blob = m.group(0)
+        if _looks_like_path(blob):
+            continue
         if _shannon(blob) >= min_entropy:
             return blob[:8] + "..."
     return None

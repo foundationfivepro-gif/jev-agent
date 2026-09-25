@@ -128,14 +128,24 @@ def _pre_tool(decision: str | None, reason: str, updated: dict | None = None) ->
     return {"hookSpecificOutput": out}
 
 
+def _bypassing(data: dict) -> bool:
+    """The user chose Bypass permissions. An "ask" from us would override that choice."""
+    return str(data.get("permission_mode") or "") == "bypassPermissions"
+
+
+_FALLBACK: dict | None = None
+
+
 def _arm_budget(fallback: dict | None) -> None:
     """Answer before Claude Code gives up on us. Silence past the deadline is an ungated call."""
+    global _FALLBACK
+    _FALLBACK = fallback
     if not hasattr(signal, "SIGALRM"):
         return
 
     def fire(_signum, _frame):
-        if fallback is not None:
-            _emit(fallback)
+        if _FALLBACK is not None:
+            _emit(_FALLBACK)
         print(f"jev: no answer within {HOOK_BUDGET_S}s", file=sys.stderr)
         os._exit(0)
 
@@ -159,6 +169,13 @@ def gate_bash(data: dict) -> None:
     if not command.strip():
         return
 
+    def ask(reason: str) -> None:
+        # In Bypass permissions mode, stay silent instead of prompting; "deny" still applies.
+        if _bypassing(data):
+            print(f"{reason} (bypass mode: not prompting)", file=sys.stderr)
+            return
+        _emit(_pre_tool("ask", reason))
+
     blocked = hard_block_reason(command)
     if blocked:
         if blocked.startswith("dangerous construct"):
@@ -166,13 +183,13 @@ def gate_bash(data: dict) -> None:
         elif blocked.startswith("blocked binary: rm") and RM_CATASTROPHIC.search(command):
             _emit(_pre_tool("deny", "jev: recursive delete of root, home or wildcard"))
         elif blocked.startswith(("blocked binary: rm", "blocked binary: unlink", "command could not")):
-            _emit(_pre_tool("ask", f"jev: {blocked}"))
+            ask(f"jev: {blocked}")
         else:
             _emit(_pre_tool("deny", f"jev: {blocked}"))
         return
 
     if _looks_secret(command):
-        _emit(_pre_tool("ask", "jev: command contains credential-shaped material; not sent to Jev"))
+        ask("jev: command contains credential-shaped material; not sent to Jev")
         return
 
     # Unconfigured is not an outage: leave the ordinary permission flow alone.
@@ -185,14 +202,14 @@ def gate_bash(data: dict) -> None:
     try:
         d = gate(command, str(data.get("cwd") or "."))
     except TransportError as exc:
-        _emit(_pre_tool("ask", f"jev unreachable ({exc}); that is not permission to proceed"))
+        ask(f"jev unreachable ({exc}); that is not permission to proceed")
         return
 
     final, reason = d.get("final"), d.get("reason", "")
     if final == "block":
         _emit(_pre_tool("deny", f"jev: {reason}"))
     elif final == "review":
-        _emit(_pre_tool("ask", f"jev: {reason}"))
+        ask(f"jev: {reason}")
     # allow: say nothing. A hook "allow" would bypass the user's own permission rules.
 
 
@@ -216,7 +233,8 @@ def route_agent(data: dict) -> None:
 
     selected = d["selected"]
     if selected == "human":
-        _emit(_pre_tool("ask", "jev_route_model: no model should attempt this unaided"))
+        if not _bypassing(data):
+            _emit(_pre_tool("ask", "jev_route_model: no model should attempt this unaided"))
         return
     if selected not in cat:
         return
@@ -475,9 +493,13 @@ def main(argv: list[str] | None = None) -> None:
         install(args)
         return
 
+    global _FALLBACK
     _arm_budget(FALLBACK[args.cmd])
     try:
-        HANDLERS[args.cmd](_read_stdin())
+        data = _read_stdin()
+        if _bypassing(data):
+            _FALLBACK = None
+        HANDLERS[args.cmd](data)
     except Exception as exc:  # a hook must never take the session down with it
         print(f"jev {args.cmd}: {type(exc).__name__}: {exc}", file=sys.stderr)
 
