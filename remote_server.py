@@ -61,6 +61,11 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Serverless platforms mount the code read-only; /tmp is the writable scratch
+# space. Traces there are per-instance and short-lived, which is fine — they
+# are an audit aid, not the product. Must be set before core is imported.
+os.environ.setdefault("JEV_TRACE_DIR", "/tmp/jev-traces")
+
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
