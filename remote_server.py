@@ -424,7 +424,15 @@ async def health(_: Request) -> PlainTextResponse:
 
 def build_app():
     """ASGI app: MCP at /mcp, plus an unauthenticated /health."""
-    app = mcp.streamable_http_app(stateless_http=True, json_response=True)
+    # The SDK defaults to localhost-only Host validation, which rejects the
+    # public hostname this runs under. DNS-rebinding protection guards servers
+    # on a user's own machine from hostile web pages; a public HTTPS endpoint
+    # has no such exposure, and TokenAuth is what gates it.
+    from mcp.server.transport_security import TransportSecuritySettings
+    app = mcp.streamable_http_app(
+        stateless_http=True, json_response=True,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
     app.router.routes.append(Route("/health", health, methods=["GET"]))
     app.add_middleware(TokenAuth)
     app.add_middleware(PathToken)     # runs first: strips the prefix before auth

@@ -18,29 +18,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from remote_server import app  # noqa: E402,F401  — Vercel serves this symbol
+from urllib.parse import parse_qsl, urlencode  # noqa: E402
 
-# TEMPORARY debug shim: echoes routing fields (never header values) when the
-# request carries x-jev-debug. Removed once path restoration is fixed.
-_inner = app
+from remote_server import app as _app  # noqa: E402
+
+# vercel.json rewrites every URL to /api/index, and Vercel hands the function
+# that rewritten path with no trace of the original. The rewrite carries the
+# original path in __jev_path; put it back so routing and the /health auth
+# exemption see the URL the client actually requested.
+_PARAM = "__jev_path"
 
 
-async def app(scope, receive, send):  # noqa: F811
-    if scope.get("type") == "http" and any(k == b"x-jev-debug" for k, _ in scope.get("headers", [])):
-        import json
-        hdrs = {k.decode(): v.decode("latin-1") for k, v in scope.get("headers", [])}
-        body = json.dumps({
-            "path": scope.get("path"),
-            "raw_path": (scope.get("raw_path") or b"").decode("latin-1"),
-            "root_path": scope.get("root_path"),
-            "query_string": scope.get("query_string", b"").decode("latin-1"),
-            "header_names": sorted(hdrs),
-            "path_like_headers": {k: v for k, v in hdrs.items()
-                                  if k not in ("authorization", "cookie", "x-api-key")
-                                  and ("path" in k or "url" in k or "uri" in k or "route" in k or "match" in k)},
-        }).encode()
-        await send({"type": "http.response.start", "status": 200,
-                    "headers": [(b"content-type", b"application/json")]})
-        await send({"type": "http.response.body", "body": body})
-        return
-    await _inner(scope, receive, send)
+async def app(scope, receive, send):
+    if scope.get("type") in ("http", "websocket"):
+        pairs = parse_qsl(scope.get("query_string", b"").decode("latin-1"), keep_blank_values=True)
+        original = next((v for k, v in pairs if k == _PARAM), None)
+        if original is not None:
+            path = "/" + original.lstrip("/")
+            rest = urlencode([(k, v) for k, v in pairs if k != _PARAM])
+            scope = dict(scope, path=path, raw_path=path.encode("latin-1"),
+                         query_string=rest.encode("latin-1"))
+    await _app(scope, receive, send)
