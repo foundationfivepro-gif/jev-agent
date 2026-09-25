@@ -689,6 +689,33 @@ def test_hooks_install_merges_and_is_idempotent(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
+def test_project_hooks_mirror_install_and_stay_cloud_only(tmp_path):
+    """The committed cloud hooks cover the same events as `hooks.py install`, and are silent locally."""
+    import hooks
+
+    s = json.loads(open(os.path.join(ROOT, ".claude", "settings.json")).read())
+    wired = {(event, g.get("matcher"), h["command"].rsplit(" ", 1)[-1])
+             for event, groups in s["hooks"].items() for g in groups for h in g["hooks"]}
+    assert wired == {
+        ("SessionStart", None, "session"), ("UserPromptSubmit", None, "prompt"),
+        ("PreToolUse", "Bash", "gate-bash"), ("PreToolUse", "Agent|Task", "route-agent"),
+        ("PostToolUse", "Agent|Task", "agent-outcome"), ("PostToolUseFailure", "Agent|Task", "agent-outcome"),
+    }
+    assert {sub for *_, sub in wired} <= set(hooks.HANDLERS)
+    mcp = json.loads(open(os.path.join(ROOT, ".mcp.json")).read())
+    assert mcp["mcpServers"]["jev"]["args"][-1] == "mcp"
+
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_REMOTE"}
+    r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud.sh"), "hook", "gate-bash"],
+                       input='{"tool_input":{"command":"rm -rf /"}}', capture_output=True, text=True,
+                       env=env, timeout=30)
+    assert r.returncode == 0 and r.stdout == ""       # local: the user-scope install already gates
+    r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud.sh"), "hook", "gate-bash"],
+                       input='{"tool_input":{"command":"rm -rf /"}}', capture_output=True, text=True,
+                       env={**env, "CLAUDE_CODE_REMOTE": "true", "JEV_TRACE_DIR": str(tmp_path)}, timeout=30)
+    assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 # ------------------------------------------------------- response validation
 
 def _gateway_reply(monkeypatch, body):

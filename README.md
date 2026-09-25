@@ -111,6 +111,31 @@ condition in your claude.ai personal preferences (Settings → Profile):
 
 There the tools come from the remote connector (`remote_server.py`, below).
 
+### Cloud sessions (claude.ai/code, `claude --cloud`)
+
+A cloud session clones this repository into a fresh VM, so it can run the full local
+server and hooks, not just the remote subset. `.mcp.json` and `.claude/settings.json`
+point at `scripts/cloud.sh`, which acts only when `CLAUDE_CODE_REMOTE=true`: it installs
+`requirements.txt` at session start, then runs `hooks.py` and `mcp_server.py` as the
+user-scope install does locally. On your own machine it exits immediately, and your
+local-scope `jev` server outranks the project one, so nothing runs twice.
+
+The VM has no `.env`, and the default **Trusted** network does not reach the gateway.
+Edit the cloud environment at claude.ai/code:
+
+- **Pro / Max:** under **API credentials**, add a Bearer credential for
+  `ai-gateway.vercel.sh` with your `vck_...` key, and set the environment variable
+  `AI_GATEWAY_API_KEY=injected-by-proxy`. The proxy attaches the real key after the
+  request leaves the VM, so the session never sees it; the variable only tells Jev a
+  key exists.
+- **Team / Enterprise** (no API credentials yet): set `AI_GATEWAY_API_KEY=vck_...` as
+  an environment variable, switch network access to **Custom**, add
+  `ai-gateway.vercel.sh`, and keep the default package-manager list. Anyone who can use
+  the environment can read the variable.
+
+Without a key the session still starts: the deterministic Bash hard block and the
+subagent return contract hold, and the SessionStart line reports `routing off (no key)`.
+
 ### MCP tools
 
 A local stdio process exposing eight read-only tools. It decides; it never edits files
