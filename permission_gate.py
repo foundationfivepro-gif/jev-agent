@@ -59,7 +59,62 @@ DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bhistory\s+-c\b", "clear shell history"),
 )
 
-SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
+def _tokens(command: str) -> list[str]:
+    """
+    Quote-aware shell tokens; operators (`|`, `&&`, `;`, `>`, `2>&1`, `(`) come
+    back as their own tokens. Splitting on operators before honouring quotes
+    breaks `grep "a|b"` or `sed 's|x|y|'` mid-quote and fails them as
+    unparseable. Raises ValueError on unbalanced quotes.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def _is_operator(token: str) -> bool:
+    return bool(token) and all(c in "();<>|&" for c in token)
+
+
+def _substitutions(word: str) -> list[str]:
+    """Bodies of every `$(...)` and backtick substitution inside one word."""
+    bodies: list[str] = []
+    i = 0
+    while i < len(word):
+        if word.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < len(word) and depth:
+                depth += {"(": 1, ")": -1}.get(word[j], 0)
+                j += 1
+            bodies.append(word[i + 2:j - 1] if depth == 0 else word[i + 2:])
+            i = j
+        elif word[i] == "`":
+            end = word.find("`", i + 1)
+            bodies.append(word[i + 1:] if end == -1 else word[i + 1:end])
+            i = len(word) if end == -1 else end + 1
+        else:
+            i += 1
+    return bodies
+
+
+def _segments(command: str) -> list[list[str]]:
+    """Split tokens into simple commands, dropping redirections and their targets."""
+    segments: list[list[str]] = [[]]
+    tokens = _tokens(command)
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _is_operator(tok):
+            if ("<" in tok or ">" in tok) and "(" not in tok:
+                if segments[-1] and segments[-1][-1].isdigit():
+                    segments[-1].pop()        # the fd in `2>file`
+                i += 2                        # skip the redirect target
+                continue
+            segments.append([])               # |, ||, &&, ;, &, (, ), <(
+        elif tok != "$":                      # bare `$` left by an unquoted `$(`
+            segments[-1].append(tok)
+        i += 1
+    return [s for s in segments if s]
 
 
 def _basename(token: str) -> str:
@@ -74,25 +129,24 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
     """
     Every binary this command line would actually execute.
 
-    Follows wrappers, recurses into `sh -c`, and splits on pipes and separators.
-    Returns lowercased basenames. Bounded recursion — a line nested deeper than
-    three shells is treated as unparseable by the caller.
+    Follows wrappers, recurses into `sh -c` and `$(...)`/backtick substitutions,
+    and splits on pipes and separators outside quotes. Returns lowercased
+    basenames. Bounded recursion — a line nested deeper than three levels is
+    treated as unparseable by the caller.
     """
     if _depth > 3:
         return ["__unparseable__"]
 
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return ["__unparseable__"]
+
     found: list[str] = []
-    for segment in SEPARATORS.split(command):
-        segment = segment.strip()
-        if not segment:
-            continue
-        try:
-            argv = shlex.split(segment)
-        except ValueError:
-            found.append("__unparseable__")
-            continue
-        if not argv:
-            continue
+    for argv in segments:
+        for word in argv:
+            for body in _substitutions(word):
+                found.extend(b for b in extract_commands(body, _depth=_depth + 1) if b != "__empty__")
 
         i = 0
         while i < len(argv):
