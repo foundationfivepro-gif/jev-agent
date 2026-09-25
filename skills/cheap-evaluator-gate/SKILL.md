@@ -30,3 +30,12 @@ escalate the uncertain middle to a real model or a human rather than guessing.
 **Gate on the mass of the bad outcome, not on confidence.** A safe command with P(block)=0 and
 confidence 0.69 fails a 0.90 confidence gate — and a gate that fires on safe input is a gate
 people switch off.
+
+**The converse holds: a "review" label is not risk.** The model calls plain file creation
+"review" — a HEIC-to-JPG conversion into a sandbox came back P(block)=0, impact 0.94, human
+0.20. `jev_gate_command` now overrules such a label to allow when P(block) ≤ 0.02, impact
+< 1.25, P(human) < 0.40 and no binary reaches past the machine (curl, git, gh, ssh, op, package
+managers — `EXTERNAL` in `permission_gate.py`). A `review` it still returns carries a reason:
+relay that reason and the exact command when you ask, ask once for a batch of related commands
+rather than per command, and never describe a gate as flagging "every" command without
+checking its `reason`.

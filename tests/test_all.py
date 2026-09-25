@@ -144,6 +144,49 @@ def test_permission_gate_uses_distribution_not_confidence():
         pg.decide = orig
 
 
+def _fake_route(pg, value, probs, impact, human):
+    class _A:
+        certainty, probabilities = 0.55, probs
+    _A.value = value
+    class _D:
+        answers = {"route": _A()}
+        def __getitem__(self, k): return {"impact": impact, "human": human}[k]
+    pg.decide = lambda *a, **k: _D()
+
+
+@pytest.mark.parametrize("command, final", [
+    ("heif-convert IMG_1.HEIC out/IMG_1.jpg", "allow"),     # local file creation
+    ("mkdir -p out && cp a.jpg out/", "allow"),
+    ("curl -s https://example.com", "review"),              # leaves the machine
+    ("git commit -m x", "review"),
+])
+def test_permission_gate_overrules_review_without_block_mass(command, final):
+    """P(block)=0, local impact: a 'review' label alone must not prompt, unless
+    the command reaches past this machine."""
+    import permission_gate as pg
+    orig = pg.decide
+    _fake_route(pg, "review", {"allow": 0.30, "review": 0.70, "block": 0.0}, 0.94, 0.20)
+    try:
+        assert pg.gate(command)["final"] == final
+    finally:
+        pg.decide = orig
+
+
+@pytest.mark.parametrize("probs, impact, human", [
+    ({"allow": 0.30, "review": 0.60, "block": 0.10}, 0.94, 0.20),   # block mass
+    ({"allow": 0.30, "review": 0.70, "block": 0.0}, 1.60, 0.20),    # broad impact
+    ({"allow": 0.30, "review": 0.70, "block": 0.0}, 0.94, 0.55),    # human wanted
+])
+def test_permission_gate_keeps_review_with_evidence_of_risk(probs, impact, human):
+    import permission_gate as pg
+    orig = pg.decide
+    _fake_route(pg, "review", probs, impact, human)
+    try:
+        assert pg.gate("cp a.jpg out/")["final"] == "review"
+    finally:
+        pg.decide = orig
+
+
 def test_credential_detector_ignores_code():
     from security_router import SECRET, classify as _c
     for benign in ("if label == SECRET:\n    x = 1", 'LABEL = {SECRET: "secret"}',

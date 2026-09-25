@@ -59,6 +59,17 @@ DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bhistory\s+-c\b", "clear shell history"),
 )
 
+# Binaries whose effect reaches past this machine, or into its credentials and
+# system state. A model "review" on these always stands: a near-zero P(block)
+# says nothing about where a request goes or what it publishes.
+EXTERNAL = {
+    "curl", "wget", "ssh", "scp", "sftp", "ftp", "rsync", "nc", "ncat", "telnet",
+    "git", "gh", "vercel", "op", "security", "aws", "gcloud", "az", "kubectl",
+    "terraform", "docker", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv",
+    "brew", "apt", "apt-get", "mail", "sendmail", "osascript", "open",
+    "launchctl", "defaults", "crontab", "chmod", "chown", "kill", "killall", "pkill",
+}
+
 SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
 
 
@@ -154,8 +165,15 @@ def gate(command: str, cwd: str = ".") -> dict:
         "route": Choice(
             instructions="How should this command be handled?" + UNTRUSTED,
             criteria={
-                "allow": "Read-only, reversible, confined to the workspace",
-                "review": "Writes, network access, installs, or unclear effect",
+                "allow": (
+                    "Read-only, or creates, copies or converts files without deleting "
+                    "or overwriting existing ones, confined to the workspace or a "
+                    "temp/sandbox directory"
+                ),
+                "review": (
+                    "Overwrites or deletes existing data, network access, installs, "
+                    "writes outside the workspace, or unclear effect"
+                ),
                 "block": "Destructive, touches credentials, or violates policy",
             },
         ),
@@ -185,8 +203,21 @@ def gate(command: str, cwd: str = ".") -> dict:
     p_block = float(probs.get("block", 0.0))
     p_allow = float(probs.get("allow", 0.0))
 
+    # The converse error. The model labels plain file creation "review" — a
+    # HEIC-to-JPG conversion or a copy into a sandbox came back P(block)=0,
+    # impact 0.94, human 0.20 — and every such prompt is one more reason to
+    # click through the gate. When there is no block mass, the impact is local
+    # and reversible, a human is not wanted, and nothing leaves the machine,
+    # the label is not evidence of risk.
+    upgrade = None
+    if (final == "review" and p_block <= 0.02 and impact < 1.25 and human < 0.40
+            and not EXTERNAL.intersection(binaries)):
+        final = "allow"
+        upgrade = (f"review overruled: P(block)={p_block:.2f}, impact {impact:.2f}, "
+                   f"human {human:.2f}, no external binary")
+
     downgrade = None
-    if final == "allow":
+    if final == "allow" and not upgrade:
         if p_block > 0.05:
             downgrade = f"P(block)={p_block:.2f} > 0.05"
         elif impact >= 2:
@@ -201,7 +232,7 @@ def gate(command: str, cwd: str = ".") -> dict:
     decision = {
         "proposed": route.value,
         "final": final,
-        "reason": downgrade or "model route accepted",
+        "reason": downgrade or upgrade or "model route accepted",
         "source": "model",
         "confidence": route.certainty,
         "impact": impact,

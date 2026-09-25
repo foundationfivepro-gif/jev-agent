@@ -259,7 +259,9 @@ def jev_gate_command(
     """
     Whether a shell command is safe: allow, review or block. The Bash hook already
     runs this on every command; call it only where no hook runs. Never execute
-    review or block. Deterministic rules (rm -rf, sh -c, sudo) run first.
+    review or block. Deterministic rules (rm -rf, sh -c, sudo) run first. Local
+    file creation with no block mass is allowed; review means real evidence of
+    risk, so ask once for the batch and quote the reason.
     """
     if not command.strip():
         raise ValueError("command is empty")
