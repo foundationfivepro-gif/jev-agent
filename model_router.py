@@ -21,6 +21,7 @@ encoding a verdict. Run it with your own numbers before trusting either answer.
 from __future__ import annotations
 
 import json
+import os
 from typing import Mapping
 
 from core import UNTRUSTED, Choice, Score, decide, write_trace
@@ -64,6 +65,17 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "for ordinary multi-step work that Opus handles",
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
+
+def available_catalog(catalog: Mapping[str, Mapping] = DEFAULT_CATALOG) -> dict[str, dict]:
+    """
+    The menu as it stands now, not as it was written: only the models listed in
+    JEV_MODELS (comma-separated, e.g. "haiku,sonnet"), when it is set. A router
+    that can pick a model the account cannot run is choosing from yesterday's menu.
+    """
+    wanted = {m.strip().lower() for m in os.environ.get("JEV_MODELS", "").split(",") if m.strip()}
+    menu = {k: dict(v) for k, v in catalog.items() if not wanted or k in wanted}
+    return menu or {k: dict(v) for k, v in catalog.items()}
+
 
 def estimate_costs(
     catalog: Mapping[str, Mapping], *, context_mtok: float, output_mtok: float, tool_mtok: float
