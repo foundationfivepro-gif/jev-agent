@@ -15,8 +15,10 @@ repositories whose CLAUDE.md says so.
                                             such as Cowork. Local; no call.
     UserPromptSubmit          prompt        one Jev call per prompt; a one-line note
                                             only when repository context is needed
-    PreToolUse   Bash         gate-bash     jev_gate_command as a hook. The hard
-                                            block is deterministic and needs no key.
+    PreToolUse   Bash         gate-bash     denies the irreversible (no key needed);
+                                            runs jev_gate_command only on commands that
+                                            send, publish or deploy. Local commands get
+                                            no Jev call and no prompt.
     PreToolUse   Agent|Task   route-agent   appends RETURN_CONTRACT to every subagent
                                             prompt (local), and sets `model` via
                                             jev_route_model when none was chosen.
@@ -38,10 +40,11 @@ Three properties hold because this runs on every event:
     explicit `ask` before that happens, not after.
   * A `deny` cannot be overridden by the user, so it is reserved for the
     irreversible: dangerous constructs and recursive deletion of root, home or
-    a wildcard. Anything else the deterministic layer dislikes becomes `ask`.
+    a wildcard. A local command never gets an `ask` from here; only one that
+    sends, publishes or deploys can.
 
-What leaves the machine: the prompt text (first MAX_TASK_CHARS) and the command
-line go to Jev through the gateway. Anything credential-shaped is held back
+What leaves the machine: the prompt text (first MAX_TASK_CHARS) and, for
+commands that reach outside, the command line go to Jev through the gateway. Anything credential-shaped is held back
 and turned into `ask` without being sent.
 
     python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md
@@ -58,7 +61,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
 import signal
 import sys
@@ -87,12 +89,6 @@ RETURN_CONTRACT = (
     f"\n\n{RETURN_MARK} Reply with the conclusion only: findings, decision or change "
     "made, with file:line references. No file dumps, logs or restated task. Under 250 "
     "words unless the task above sets its own format."
-)
-
-# `rm` targeting root, home or a bare wildcard is the one deletion that earns a
-# hard deny. Every other rm is `ask`: the user sees it and decides.
-RM_CATASTROPHIC = re.compile(
-    r"\brm\b\s+(?:-\w+\s+)*(?:/|~|\$HOME|\*)(?=\s|$|['\"])", re.IGNORECASE
 )
 
 
@@ -177,7 +173,7 @@ def _looks_secret(text: str) -> bool:
 
 
 def gate_bash(data: dict) -> None:
-    from permission_gate import hard_block_reason
+    from permission_gate import triage
 
     command = str((data.get("tool_input") or {}).get("command") or "")
     if not command.strip():
@@ -190,16 +186,14 @@ def gate_bash(data: dict) -> None:
             return
         _emit(_pre_tool("ask", reason))
 
-    blocked = hard_block_reason(command)
-    if blocked:
-        if blocked.startswith("dangerous construct"):
-            _emit(_pre_tool("deny", f"jev: {blocked}"))
-        elif blocked.startswith("blocked binary: rm") and RM_CATASTROPHIC.search(command):
-            _emit(_pre_tool("deny", "jev: recursive delete of root, home or wildcard"))
-        elif blocked.startswith(("blocked binary: rm", "blocked binary: unlink", "command could not")):
-            ask(f"jev: {blocked}")
-        else:
-            _emit(_pre_tool("deny", f"jev: {blocked}"))
+    # Local work (builds, tests, commits, installs, deletes inside the workspace)
+    # never reaches Jev and never gets an "ask" from us: Claude Code's own
+    # permission rules decide. Only the irreversible is denied here.
+    kind, reason = triage(command)
+    if kind == "block":
+        _emit(_pre_tool("deny", f"jev: {reason}"))
+        return
+    if kind == "local":
         return
 
     if _looks_secret(command):

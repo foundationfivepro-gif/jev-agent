@@ -74,7 +74,7 @@ from starlette.routing import Route  # noqa: E402
 
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
 from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
-from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
+from permission_gate import extract_commands, gate, triage  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 
 TOKEN = os.getenv("JEV_REMOTE_TOKEN", "")
@@ -85,7 +85,8 @@ mcp = MCPServer(
         "Jev decision tools that need no access to your filesystem. Use "
         "jev_check_action before anything with external effect, jev_should_run "
         "before a scheduled automation executes, and jev_gate_command before a "
-        "shell command. For repository context selection, use the LOCAL jev "
+        "shell command that sends, publishes or deploys (local commands need no "
+        "call). For repository context selection, use the LOCAL jev "
         "server — that capability cannot work remotely."
     ),
 )
@@ -282,16 +283,17 @@ def jev_gate_command(
     """
     Decide whether a shell command is safe to run.
 
-    Do not execute anything that returns review or block. A deterministic policy
+    Only commands that send, publish or deploy need this; local ones return allow
+    without a Jev call. Do not execute anything that returns review or block. A deterministic policy
     runs first and cannot be overridden: it resolves absolute paths, follows
     wrappers like sudo, recurses into `sh -c` and splits pipelines, so
     `bash -c 'rm -rf /'` is caught as readily as `rm -rf /`.
     """
     if not command.strip():
         raise ValueError("command is empty")
-    blocked = hard_block_reason(command)
-    if blocked:
-        return CommandDecision(decision="block", reason=blocked,
+    kind, reason = triage(command)
+    if kind != "external":
+        return CommandDecision(decision="block" if kind == "block" else "allow", reason=reason,
                                binaries=extract_commands(command), source="policy")
     _require_key()
     try:
