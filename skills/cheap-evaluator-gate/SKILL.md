@@ -5,7 +5,8 @@ description: Put a cheap evaluation model in front of expensive work — relevan
 
 # Gating expensive work behind a cheap evaluator
 
-**Tools**: `jev_gate_command(command, cwd)` before running a shell command;
+**Tools**: `jev_gate_command(command, cwd)` before a shell command that sends, publishes or
+deploys (local commands need no call; it returns allow for them without reaching Jev);
 `jev_classify_data(paths, content)` before sending content anywhere (local-only, no
 model call); `jev_select_context(...)` before reading files.
 

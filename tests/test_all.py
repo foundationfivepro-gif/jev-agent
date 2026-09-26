@@ -858,6 +858,42 @@ def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch
     assert not any("secret output" in f.read_text() for f in tmp_path.iterdir())
 
 
+def test_report_counts_empty_results_and_cost_per_completed_subagent(tmp_path, monkeypatch):
+    import core
+    import hooks
+
+    monkeypatch.setattr(core, "TRACE_DIR", tmp_path)
+    for tid in ("a", "b", "c"):
+        core.write_trace("model_router", {"task": tid}, {"selected": "sonnet", "fallback": None,
+                         "input_tokens": 1000}, meta={"tool_use_id": tid})
+    hooks.agent_outcome({"tool_use_id": "a", "tool_input": {"model": "sonnet"},
+                         "tool_response": {"content": [{"type": "text", "text": "fixed x.py:3"}],
+                                           "totalTokens": 40_000}})
+    hooks.agent_outcome({"tool_use_id": "b", "tool_input": {"model": "sonnet"},
+                         "tool_response": {"content": [{"type": "text", "text": "  "}],
+                                           "totalTokens": 20_000}})
+    hooks.agent_outcome({"tool_use_id": "c", "tool_input": {"model": "sonnet"},
+                         "tool_response": {"content": "done", "usage": {"input_tokens": 30_000,
+                                                                          "output_tokens": 10_000}}})
+
+    rep = hooks.report(tmp_path)
+    assert rep["outcomes_by_selected_model"] == {"sonnet": {"ok": 2, "empty": 1}}
+    # The empty run's tokens count against the two that came back with something.
+    assert rep["cost_per_completed_subagent"]["sonnet"]["tokens_per_ok"] == 50_000
+    assert rep["cost_per_completed_subagent"]["sonnet"]["usd_per_ok_at_input_rate"] == 0.1
+    assert rep["jev_routing_cost_usd"] == round(3000 * 0.042 / 1e6, 6)
+
+
+def test_router_menu_is_what_the_account_has(monkeypatch):
+    from model_router import available_catalog
+    monkeypatch.setenv("JEV_MODELS", "haiku, sonnet")
+    assert sorted(available_catalog()) == ["haiku", "sonnet"]
+    monkeypatch.setenv("JEV_MODELS", "nothing-real")
+    assert "opus" in available_catalog()          # a typo must not empty the menu
+    monkeypatch.delenv("JEV_MODELS")
+    assert "fable" in available_catalog()
+
+
 def test_update_script_parses_and_restarts_after_pulling():
     """`git pull` can rewrite update.sh while bash is still reading it."""
     path = os.path.join(ROOT, "update.sh")

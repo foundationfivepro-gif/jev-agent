@@ -256,8 +256,9 @@ def route_agent(data: dict) -> None:
         return
 
     from core import InvalidResponse, TransportError, write_trace
-    from model_router import DEFAULT_CATALOG as cat, route_model
+    from model_router import available_catalog, route_model
 
+    cat = available_catalog()
     meta = _join_keys(data)
     try:
         d = route_model(task[:MAX_TASK_CHARS], catalog=cat, trace_meta=meta)
@@ -311,12 +312,33 @@ def agent_outcome(data: dict) -> None:
     failed = data.get("hook_event_name") == "PostToolUseFailure" or bool(data.get("error"))
     if isinstance(response, dict) and response.get("is_error"):
         failed = True
-    text = response if isinstance(response, str) else json.dumps(response, default=str) if response else ""
+    text = _response_text(response)
+    # A subagent that returns nothing did not succeed, however cleanly it exited:
+    # the check is on what came back, not on the router's confidence.
+    status = "error" if failed else "empty" if not text.strip() else "ok"
+    usage = response.get("usage") if isinstance(response, dict) else None
+    tokens = response.get("totalTokens") if isinstance(response, dict) else None
+    if tokens is None and isinstance(usage, dict):
+        tokens = sum(int(usage.get(k) or 0) for k in (
+            "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
     write_trace("model_router_outcome", meta, None, {
-        "status": "error" if failed else "ok",
+        "status": status,
         "model": tool_input.get("model"),
         "response_chars": len(text),
+        "tokens": tokens,
     }, meta=meta)
+
+
+def _response_text(response) -> str:
+    """The text a subagent returned, from Claude Code's Agent tool_response shapes."""
+    if isinstance(response, str):
+        return response
+    if not isinstance(response, dict):
+        return ""
+    content = response.get("content", response.get("result", ""))
+    if isinstance(content, list):
+        return "".join(str(c.get("text", "")) if isinstance(c, dict) else str(c) for c in content)
+    return str(content or "")
 
 
 def report(trace_dir: Path | None = None) -> dict:
@@ -341,19 +363,40 @@ def report(trace_dir: Path | None = None) -> dict:
         else:
             unjoined += 1
 
+    from model_router import DEFAULT_CATALOG
+
     by_model: dict[str, Counter] = {}
+    tokens_by_model: Counter = Counter()
     fallbacks: Counter = Counter()
+    jev_input = 0
     for key, d in routes.items():
         fallbacks[d.get("fallback") or "accepted"] += 1
+        jev_input += int(d.get("input_tokens") or 0)
         model = str(d.get("selected"))
-        status = (outcomes.get(key) or {}).get("status", "no_outcome")
-        by_model.setdefault(model, Counter())[status] += 1
+        outcome = outcomes.get(key) or {}
+        by_model.setdefault(model, Counter())[outcome.get("status", "no_outcome")] += 1
+        tokens_by_model[model] += int(outcome.get("tokens") or 0)
+
+    # The bill that matters is per task that came back with something, not per
+    # decision: a cheap route that fails costs its tokens plus the retry.
+    cost_per_ok = {}
+    for model, counts in by_model.items():
+        ok, spent = counts.get("ok", 0), tokens_by_model[model]
+        rate = (DEFAULT_CATALOG.get(model) or {}).get("cost_in")
+        if ok and spent:
+            cost_per_ok[model] = {
+                "tokens_per_ok": spent // ok,
+                "usd_per_ok_at_input_rate": round(spent / ok * rate / 1e6, 4) if rate else None,
+            }
+    jev_rate = float(os.environ.get("JEV_PRICE_PER_MTOK", "0.042"))
     explicit = sum(1 for k in outcomes if k not in routes)
     latencies = sorted(d["latency_ms"] for d in routes.values() if d.get("latency_ms") is not None)
     return {
         "routed": len(routes),
         "fallbacks": dict(fallbacks),
         "outcomes_by_selected_model": {m: dict(c) for m, c in sorted(by_model.items())},
+        "cost_per_completed_subagent": dict(sorted(cost_per_ok.items())),
+        "jev_routing_cost_usd": round(jev_input * jev_rate / 1e6, 6),
         "subagents_not_routed_by_jev": explicit,
         "decisions_without_tool_use_id": unjoined,
         "median_latency_ms": latencies[len(latencies) // 2] if latencies else None,
