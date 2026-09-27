@@ -53,9 +53,7 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "powershell
 DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bfind\b[^|;]*-delete\b", "find -delete"),
     (r"\bfind\b[^|;]*-exec\b[^;]*\brm\b", "find -exec rm"),
-    (r"\b(curl|wget)\b[^|]*\|\s*"
-     r"(?:(?:sudo|doas|env|command|exec|nice|nohup|time)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+)*"
-     r"(?:\S*/)?(?:ba|z|da|k)?sh\b", "pipe download to shell"),
+    # A download piped to a shell is judged from the pipeline's argv (_pipe_to_shell).
     (r">\s*/dev/(sd[a-z]|nvme\d|disk\d)", "write to raw device"),
     (r":\(\)\s*\{.*\|.*&.*\}\s*;", "fork bomb"),
 )
@@ -203,6 +201,46 @@ def _skip_prefix(argv: list[str]) -> list[str]:
     return argv
 
 
+_REDIRECT = re.compile(r"^(?:\d*|&)(?:>>?|<|>&|<&|&>>?)(.*)$")
+
+
+def _reads_stdin_script(argv: list[str]) -> bool:
+    """
+    Whether this shell runs its script from stdin: `bash`, `sudo sh`, `bash -s -- args`,
+    `bash 2>/dev/null`. Not with -c, and not with a script file operand.
+    """
+    if _basename(argv[0]) not in SHELLS or _shell_payload(argv) is not None:
+        return False
+    args = iter(argv[1:])
+    for a in args:
+        if (m := _REDIRECT.match(a)):
+            if not m.group(1):
+                next(args, None)                # `2> /dev/null`: the target is the next token
+            continue
+        if a == "--":
+            return next(args, None) is None     # `bash -- script.sh`; -s would have returned above
+        if a.startswith("-") or a.startswith("+"):
+            if not a.startswith("--") and "s" in a[1:]:
+                return True                     # -s: script from stdin, the rest are $1...
+            continue
+        return False                            # a script file operand
+    return True
+
+
+def _find_exec_payloads(argv: list[str]) -> list[list[str]]:
+    """The commands `find -exec/-execdir/-ok/-okdir ... ;|+` runs, each past wrappers."""
+    payloads = []
+    if _basename(argv[0]) != "find":
+        return payloads
+    for j, a in enumerate(argv):
+        if a in ("-exec", "-execdir", "-ok", "-okdir"):
+            rest = argv[j + 1:]
+            stop = next((k for k, b in enumerate(rest) if b in (";", "+")), len(rest))
+            if (inner := _skip_prefix(rest[:stop])):
+                payloads.append(inner)
+    return payloads
+
+
 def _shell_payload(argv: list[str]) -> str | None:
     """The command string a shell runs via -c, including combined flags such as `bash -lc`."""
     for j, arg in enumerate(argv[1:-1], start=1):
@@ -216,6 +254,22 @@ def _shell_payload(argv: list[str]) -> str | None:
 # A heredoc: `<<EOF`, `<<-'EOF'`, `<<"EOF"`. Group 3 is the body, up to the terminator line.
 # A heredoc operator and its delimiter word: 'quoted', "quoted", \\escaped or bare.
 _HEREDOC_OP = re.compile(r"""(?<!<)<<(-)?(?!<)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([^\s;&|<>()'"\\]+))""")
+
+
+def _unquoted_at(command: str, start: int, index: int) -> bool:
+    """Whether command[index] is outside quotes, scanning from `start` (a point known to be outside)."""
+    quote, i = None, start
+    while i < index:
+        c = command[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        i += 1
+    return quote is None
 
 
 def _strip_heredocs(command: str) -> tuple[str, list[str]]:
@@ -235,7 +289,9 @@ def _strip_heredocs(command: str) -> tuple[str, list[str]]:
         line_start = command.rfind("\n", 0, m.start()) + 1
         prefix = command[line_start:m.start()]
         body_start = command.find("\n", m.end())
-        if body_start < 0 or not _strip_comments(prefix + "<<").endswith("<<"):
+        if (body_start < 0 or not _strip_comments(prefix + "<<").endswith("<<")
+                or not _unquoted_at(command, pos, m.start())
+                or _lift_substitutions(command[pos:m.start()] + ")")[0].count("$((") > 0):
             search = m.end()
             continue
         body_start += 1
@@ -260,9 +316,7 @@ def _strip_heredocs(command: str) -> tuple[str, list[str]]:
         except ValueError:
             head = head_text.split()
         head = _skip_prefix(head)
-        reads_script = (head and _basename(head[0]) in SHELLS and _shell_payload(head) is None
-                        and not any(not a.startswith("-") for a in head[1:]))
-        if reads_script:
+        if head and _reads_stdin_script(head):
             executed.append(body)
         elif not quoted:
             executed.extend(_lift_substitutions(body, quotes=False)[1])
@@ -279,6 +333,7 @@ def _segments(command: str, *, pipes: bool = False):
     With pipes=True, returns (segment, piped) pairs, piped meaning the segment
     reads the previous one's output (`|` or `|&`, not `||`).
     """
+    command = command.replace("\\\n", " ")        # backslash-newline continues the line
     segments, cur, quote, i, piped = [], [], None, 0, False
     n = len(command)
     while i < n:
@@ -293,6 +348,8 @@ def _segments(command: str, *, pipes: bool = False):
         elif c in "'\"":
             quote = c
             cur.append(c)
+        elif c == "\n" and not "".join(cur).strip() and segments:
+            pass                                # `a |` or `a &&` then newline: the pipeline goes on
         elif c in ";|\n" or (c == "&" and command[i - 1:i] not in (">", "<") and command[i + 1:i + 2] != ">"):
             segments.append(("".join(cur), piped))
             cur = []
@@ -399,14 +456,7 @@ def _pipelines(text: str) -> list[list[list[str]]]:
             if not argv:
                 continue
             stage.append(argv)
-            if _basename(argv[0]) == "find":
-                for j, a in enumerate(argv):
-                    if a in ("-exec", "-execdir", "-ok", "-okdir"):
-                        rest = argv[j + 1:]
-                        stop = next((k for k, b in enumerate(rest) if b in (";", "+")), len(rest))
-                        inner = _skip_prefix(rest[:stop])
-                        if inner:
-                            stage.append(inner)
+            stage.extend(_find_exec_payloads(argv))
         if not stage:
             continue
         if piped and pipelines:
@@ -424,8 +474,7 @@ def _pipe_to_shell(text: str) -> bool:
             name = _basename(argv[0])
             if name in ("curl", "wget"):
                 downloaded = True
-            elif downloaded and name in SHELLS and _shell_payload(argv) is None and not any(
-                    not a.startswith("-") for a in argv[1:]):
+            elif downloaded and _reads_stdin_script(argv):
                 return True
     return False
 
@@ -535,6 +584,8 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
             found.extend(extract_commands(" ".join(argv[1:]), _depth=_depth + 1))
         else:
             found.append(name)
+            for inner in _find_exec_payloads(argv):
+                found.extend(extract_commands(shlex.join(inner), _depth=_depth + 1))
     return found or ["__empty__"]
 
 
