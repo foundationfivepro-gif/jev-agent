@@ -127,7 +127,7 @@ class CommandDecision(BaseModel):
     decision: Literal["allow", "review", "block"]
     reason: str
     binaries: list[str]
-    source: Literal["policy", "model"]
+    source: Literal["policy", "model", "unavailable"]
 
 
 class ModelRouteDecision(BaseModel):
@@ -282,8 +282,9 @@ def jev_gate_command(
     """
     Decide whether a shell command is safe to run.
 
-    Do not execute anything that returns review or block. A deterministic policy
-    runs first and cannot be overridden: it resolves absolute paths, follows
+    Never execute a block whose source is 'policy'. A model review or block is
+    advice, never a veto: the user's permission mode decides. The deterministic
+    policy runs first and cannot be overridden: it resolves absolute paths, follows
     wrappers like sudo, recurses into `sh -c` and splits pipelines, so
     `bash -c 'rm -rf /'` is caught as readily as `rm -rf /`.
     """
@@ -297,8 +298,8 @@ def jev_gate_command(
     try:
         d = gate(command, cwd)
     except TransportError as exc:
-        return CommandDecision(decision="review", reason=f"Jev unreachable ({exc}); failing closed.",
-                               binaries=extract_commands(command), source="policy")
+        return CommandDecision(decision="review", reason=f"Jev unreachable ({exc}); the user's permission mode decides.",
+                               binaries=extract_commands(command), source="unavailable")
     return CommandDecision(decision=d["final"], reason=d.get("reason", ""),
                            binaries=d.get("binaries", []), source=d.get("source", "model"))
 

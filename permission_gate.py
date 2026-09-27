@@ -19,10 +19,12 @@ cannot parse becomes 'review' rather than 'allow'.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
-from pathlib import PurePosixPath, PureWindowsPath
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable
 
 from core import UNTRUSTED, Choice, Noul, Score, decide, write_trace
@@ -141,6 +143,38 @@ def hard_block_reason(command: str) -> str | None:
     return None
 
 
+def operator_allow(command: str, cwd: str, now: datetime | None = None) -> dict | None:
+    """
+    An owner-approved allowlist for commands the model will always send to review.
+
+    `EXTERNAL` binaries (vercel, op, gh, ...) keep a model "review" by design, so
+    an operation the owner has explicitly approved still cannot run. The allowlist
+    file (JEV_COMMAND_ALLOWLIST, default ~/.jev/command-allow.json) holds entries
+    {"pattern": <regex, full match>, "cwd_prefix": <path>, "expires": <ISO-8601>,
+    "reason": <text>}. An entry must carry an expiry; expired, malformed or
+    cwd-mismatched entries are ignored. Hard blocks run before this and still win.
+    """
+    path = Path(os.environ.get("JEV_COMMAND_ALLOWLIST") or Path.home() / ".jev" / "command-allow.json")
+    try:
+        entries = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    now = now or datetime.now(timezone.utc)
+    for entry in entries if isinstance(entries, list) else []:
+        try:
+            expires = datetime.fromisoformat(str(entry["expires"]).replace("Z", "+00:00"))
+            if expires.tzinfo is None or expires <= now:
+                continue
+            prefix = str(entry.get("cwd_prefix") or "")
+            if prefix and not os.path.realpath(cwd).startswith(os.path.realpath(prefix)):
+                continue
+            if re.fullmatch(str(entry["pattern"]), command.strip(), re.DOTALL):
+                return {"reason": str(entry.get("reason") or "owner allowlist"), "expires": expires.isoformat()}
+        except (KeyError, TypeError, ValueError, re.error):
+            continue
+    return None
+
+
 def gate(command: str, cwd: str = ".") -> dict:
     """
     Decide allow / review / block for one command.
@@ -161,6 +195,13 @@ def gate(command: str, cwd: str = ".") -> dict:
     binaries = extract_commands(command)
     state = {"command": command, "binaries": binaries, "cwd": cwd}
 
+    approved = operator_allow(command, cwd)
+    if approved:
+        decision = {"proposed": None, "final": "allow", "reason": f"owner allowlist: {approved['reason']}",
+                    "source": "operator_allowlist", "expires": approved["expires"], "binaries": binaries}
+        write_trace("permission", state, decision)
+        return decision
+
     result = decide(state, {
         "route": Choice(
             instructions="How should this command be handled?" + UNTRUSTED,
@@ -172,9 +213,10 @@ def gate(command: str, cwd: str = ".") -> dict:
                 ),
                 "review": (
                     "Overwrites or deletes existing data, network access, installs, "
-                    "writes outside the workspace, or unclear effect"
+                    "writes outside the workspace, uses credentials, or unclear effect"
                 ),
-                "block": "Destructive, touches credentials, or violates policy",
+                "block": "Destructive or irreversible, exfiltrates credentials to an "
+                         "unknown destination, or violates policy",
             },
         ),
         "impact": Score(

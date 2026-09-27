@@ -591,6 +591,20 @@ def test_hook_still_denies_in_bypass_mode(tmp_path):
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize("mode,expected", [("default", "ask"), ("bypassPermissions", None)])
+def test_hook_model_block_is_never_a_deny(mode, expected, monkeypatch):
+    """A model "block" (e.g. "touches credentials") is judgement; the user's permission choice decides."""
+    import hooks
+    import permission_gate
+    emitted = []
+    monkeypatch.setattr(hooks, "_have_key", lambda: True)
+    monkeypatch.setattr(hooks, "_emit", emitted.append)
+    monkeypatch.setattr(permission_gate, "gate", lambda c, cwd: {"final": "block", "reason": "touches credentials"})
+    hooks.gate_bash({"permission_mode": mode, "tool_input": {"command": "op read op://vault/item/field"}})
+    decisions = [e["hookSpecificOutput"]["permissionDecision"] for e in emitted]
+    assert decisions == ([expected] if expected else [])
+
+
 def test_long_paths_are_not_credential_shaped():
     from security_router import SECRET, classify
     cmd = ('cd /Users/administrator/Projects/active/wellness-by-madeline/crm-v2-quota-fix && '

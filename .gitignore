@@ -20,3 +20,4 @@ venv/
 
 # Benchmark corpus is cloned, not vendored
 corpus/
+.codex/

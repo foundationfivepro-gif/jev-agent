@@ -22,7 +22,7 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 
 ## Without it, do them yourself
 
-- Before a shell command: `jev_gate_command`. Never run `review` or `block`.
+- Before a shell command: `jev_gate_command`. Never run a `policy` block; a model `review`/`block` is advice — the user's permission mode decides.
 - Before delegating: `jev_route_model`; use `selected` as the model (`human`: don't
   delegate), and end the subagent prompt by asking for the conclusion only.
 

@@ -106,7 +106,7 @@ condition in your claude.ai personal preferences (Settings → Profile):
 > call jev_check_action. Before sending file contents to an outside service, call
 > jev_classify_data; secret means stop. Before reading files to find something, call
 > jev_select_context. Unless the session context says "jev hooks active": call
-> jev_gate_command before shell commands (never run review or block), and
+> jev_gate_command before shell commands (never run a policy block; model verdicts are advice), and
 > jev_route_model before delegating (use the model it selects).
 
 There the tools come from the remote connector (`remote_server.py`, below).

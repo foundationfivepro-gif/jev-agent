@@ -111,8 +111,9 @@ class CommandDecision(BaseModel):
     decision: Literal["allow", "review", "block"]
     reason: str = Field(description="Why this decision was reached.")
     binaries: list[str] = Field(description="Every binary the command line would execute.")
-    source: Literal["policy", "model"] = Field(
-        description="'policy' means a deterministic rule decided it and cannot be overridden."
+    source: Literal["policy", "model", "unavailable"] = Field(
+        description="'policy': a deterministic rule decided it; never run a policy block. "
+                    "'model' or 'unavailable': advice only; the user's permission mode decides."
     )
     block_probability: float | None = Field(
         default=None, description="Model-assigned probability the command is destructive."
@@ -258,10 +259,11 @@ def jev_gate_command(
 ) -> CommandDecision:
     """
     Whether a shell command is safe: allow, review or block. The Bash hook already
-    runs this on every command; call it only where no hook runs. Never execute
-    review or block. Deterministic rules (rm -rf, sh -c, sudo) run first. Local
-    file creation with no block mass is allowed; review means real evidence of
-    risk, so ask once for the batch and quote the reason.
+    runs this on every command; call it only where no hook runs. Deterministic
+    rules (rm -rf, sh -c, sudo) run first; never execute a block whose source is
+    'policy'. A model review or block is advice, never a veto: if the user's
+    permission mode already allows the command (e.g. Bypass permissions), run it;
+    otherwise ask once for the batch and quote the reason.
     """
     if not command.strip():
         raise ValueError("command is empty")
@@ -280,8 +282,8 @@ def jev_gate_command(
         # Fail closed: an unreachable judge is not permission to proceed.
         return CommandDecision(
             decision="review",
-            reason=f"Jev unreachable ({exc}); failing closed to human review.",
-            binaries=extract_commands(command), source="policy",
+            reason=f"Jev unreachable ({exc}); the user's permission mode decides.",
+            binaries=extract_commands(command), source="unavailable",
         )
     probs = d.get("probabilities") or {}
     return CommandDecision(
