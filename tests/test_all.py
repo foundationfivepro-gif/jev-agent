@@ -941,3 +941,108 @@ def test_update_script_parses_and_restarts_after_pulling():
     assert subprocess.run(["bash", "-n", path]).returncode == 0
     src = open(path).read()
     assert 'exec bash "$HERE/update.sh"' in src and "--ff-only" in src
+
+
+# ------------------------------------------------------- when Jev goes quiet
+
+class _Clock:
+    """Fake monotonic clock; sleep advances it instead of waiting."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, s):
+        self.slept.append(s)
+        self.now += s
+
+
+def _quiet_gateway(monkeypatch, fail, deadline=15.0):
+    import core
+
+    clock = _Clock()
+    timeouts = []
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
+    monkeypatch.setattr(core, "DEADLINE_S", deadline)
+    monkeypatch.setattr(core.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(core.time, "sleep", clock.sleep)
+
+    def urlopen(req, timeout):
+        timeouts.append(timeout)
+        clock.now += timeout          # the call hangs until its own timeout
+        raise fail()
+
+    monkeypatch.setattr(core.urllib.request, "urlopen", urlopen)
+    return clock, timeouts
+
+
+def test_silent_gateway_gives_up_at_the_deadline(monkeypatch):
+    import urllib.error
+    import core
+
+    clock, timeouts = _quiet_gateway(monkeypatch, lambda: urllib.error.URLError("timed out"))
+    with pytest.raises(core.TransportError, match="no answer within 15s"):
+        decide({"x": 1}, _route_questions())
+    # Without the deadline this is 4 x 30s of timeouts plus backoff.
+    assert clock.now <= core.DEADLINE_S
+    assert timeouts == [15.0]
+
+
+def test_retry_after_past_the_deadline_is_not_slept(monkeypatch):
+    import io
+    import urllib.error
+    import core
+
+    def rate_limited():
+        return urllib.error.HTTPError("u", 429, "slow down", {"retry-after": "60"}, io.BytesIO(b""))
+
+    clock, _ = _quiet_gateway(monkeypatch, rate_limited)
+    with pytest.raises(core.TransportError, match="gateway 429"):
+        decide({"x": 1}, _route_questions())
+    assert clock.slept == [] and clock.now <= core.DEADLINE_S
+
+
+def test_timeout_mid_read_is_a_transport_error(monkeypatch):
+    import core
+
+    _quiet_gateway(monkeypatch, lambda: TimeoutError("read timed out"), deadline=1.0)
+    with pytest.raises(core.TransportError):
+        decide({"x": 1}, _route_questions())
+
+
+def _jev_down(monkeypatch, mod):
+    import core
+    import harness
+    import model_router
+
+    def down(*a, **k):
+        raise core.TransportError("gateway unreachable: test")
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
+    monkeypatch.setattr(harness, "should_run", down)
+    monkeypatch.setattr(model_router, "route_model", down)
+    monkeypatch.setattr(mod, "decide", down)
+
+
+@pytest.mark.parametrize("server", ["mcp_server", "remote_server"])
+def test_should_run_fails_open_when_jev_is_down(monkeypatch, server):
+    import importlib
+    mod = importlib.import_module(server)
+    _jev_down(monkeypatch, mod)
+    d = mod.jev_should_run("ingest", "ingest reports", {"new_files": 3})
+    assert d.decision == "proceed" and d.source == "policy"
+    assert d.proceed_probability is None and "failing open" in d.reason
+
+
+@pytest.mark.parametrize("server", ["mcp_server", "remote_server"])
+def test_unreachable_errors_name_a_fallback(monkeypatch, server):
+    import importlib
+    mod = importlib.import_module(server)
+    _jev_down(monkeypatch, mod)
+    with pytest.raises(ValueError, match="Fallback: delegate without setting a model"):
+        mod.jev_route_model("rename a variable")
+    with pytest.raises(ValueError, match="Fallback: apply the default"):
+        mod.jev_evaluate({"x": 1}, [{"id": "ok", "type": "boolean", "instructions": "is it ok"}])

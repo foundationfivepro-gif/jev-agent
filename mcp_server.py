@@ -33,7 +33,9 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
-from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
+from core import (  # noqa: E402
+    Choice, Noul, Score, TransportError, active_transport, decide, unreachable,
+)
 from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, triage  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
@@ -65,6 +67,7 @@ def _require_key() -> None:
             "server's env: `claude mcp add jev --env AI_GATEWAY_API_KEY=... -- "
             "python3 mcp_server.py`."
         )
+
 
 
 def _gather(root: Path, globs: list[str] | None) -> list[Path]:
@@ -146,8 +149,10 @@ class ScheduledRunDecision(BaseModel):
 
     decision: Literal["proceed", "skip", "escalate"]
     reason: str
-    proceed_probability: float = Field(description="Probability there is new material to act on.")
-    novelty: float = Field(description="0=nothing new, 3=unusually large.")
+    proceed_probability: float | None = Field(description=(
+        "Probability there is new material to act on. None when Jev did not answer."))
+    novelty: float | None = Field(description=(
+        "0=nothing new, 3=unusually large. None when Jev did not answer."))
     source: Literal["policy", "model"]
 
 
@@ -236,7 +241,8 @@ def jev_select_context(
             f"trustworthy and has been discarded rather than returned. {exc}"
         ) from exc
     except TransportError as exc:
-        raise ValueError(f"Jev unreachable: {exc}") from exc
+        raise unreachable(exc, "locate files with Grep/Glob and read only the ones that "
+                           "match the goal; do not read the whole tree.") from exc
 
     return ContextSelection(
         include=[by_id[c.id] for c in packed.included if c.id in by_id],
@@ -377,7 +383,8 @@ def jev_evaluate(
     try:
         d = decide(state, built)
     except TransportError as exc:
-        raise ValueError(f"Jev unreachable: {exc}") from exc
+        raise unreachable(exc, "apply the default your caller defined for no answer. "
+                           "Silence is neither yes nor a reason to stop.") from exc
 
     return Evaluation(
         answers={k: a.value for k, a in d.answers.items()},
@@ -438,7 +445,12 @@ def jev_should_run(
     try:
         d = should_run(automation, purpose, signals, force_if_stale_runs=force_after_skips)
     except TransportError as exc:
-        raise ValueError(f"Jev unreachable: {exc}") from exc
+        # Fails open, as documented: skipping a run that mattered loses data
+        # silently; a redundant run only costs tokens.
+        return ScheduledRunDecision(
+            decision="proceed", reason=f"Jev unreachable ({exc}); failing open.",
+            proceed_probability=None, novelty=None, source="policy",
+        )
     return ScheduledRunDecision(
         decision=d.action, reason=d.reason,
         proceed_probability=round(d.proceed_probability, 3),
@@ -509,9 +521,10 @@ def jev_route_model(
 
     cat = catalog or DEFAULT_CATALOG
     try:
-        d = route_model(task, catalog=cat, max_cost_in=max_cost_in)
+        d = route_model(task, catalog=cat)
     except TransportError as exc:
-        raise ValueError(f"Jev unreachable: {exc}") from exc
+        raise unreachable(exc, "delegate without setting a model; the session default "
+                           "applies.") from exc
 
     chosen = cat.get(d["selected"], {})
     return ModelRouteDecision(
