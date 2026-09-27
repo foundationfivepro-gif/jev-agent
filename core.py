@@ -42,7 +42,7 @@ __all__ = [
     "Choice", "Noul", "Score",          # re-exported so modules import one place
     "decide", "decide_batched", "write_trace",
     "Decision", "TransportError", "InvalidResponse", "active_transport", "MAX_QUESTIONS",
-    "UNTRUSTED",
+    "UNTRUSTED", "DEADLINE_S", "unreachable",
 ]
 
 # ---------------------------------------------------------------- configuration
@@ -77,6 +77,16 @@ RETRY = RetryPolicy(
     timeout=30.0,
 )
 
+# Wall-clock cap on one decide(), retries and backoff included. RETRY alone
+# allows 4 x 30s timeouts plus up to 90s between attempts: several minutes in
+# which an agent waiting on a gate hears nothing and, left to itself, treats
+# silence as a reason to stop. Past this, decide() raises TransportError and
+# each caller's documented default takes over. It sits under the hooks' 20s
+# budget so the hook reports why rather than being cut off.
+# decide_batched applies it per batch. Offline jobs that can wait out a 429's
+# Retry-After should raise it.
+DEADLINE_S = float(os.getenv("JEV_DEADLINE_S", "15"))
+
 # Anchored to this file: MCP clients launch the server from arbitrary cwds, including read-only `/`.
 TRACE_DIR = Path(os.getenv("JEV_TRACE_DIR") or Path(__file__).resolve().parent / "traces")
 
@@ -93,6 +103,17 @@ class InvalidResponse(TransportError):
     failed call as "no decision", and a malformed answer is exactly that. It is
     never retried — the same request would be sampled again, not repaired.
     """
+
+
+def unreachable(exc: Exception, fallback: str) -> ValueError:
+    """
+    The error a tool raises when Jev did not answer, naming what to do instead.
+
+    A bare "unreachable" leaves the agent to improvise, and the usual
+    improvisation is to stop: silence read as the safe answer. Every MCP
+    tool that cannot supply its own default says which one applies.
+    """
+    return ValueError(f"Jev unreachable: {exc}. Fallback: {fallback}")
 
 
 # Appended to questions whose state carries text a user or a repository wrote:
@@ -256,17 +277,22 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
     wire = _questions_to_wire(questions)
     payload = json.dumps({"model": GATEWAY_MODEL, "state": state, "questions": wire}).encode()
     started = time.monotonic()
+    answered = False
 
     last: Exception | None = None
     for attempt in range(RETRY.max_retries + 1):
+        remaining = DEADLINE_S - (time.monotonic() - started)
+        if remaining <= 0:
+            break
         req = urllib.request.Request(
             f"{GATEWAY_URL}/evaluate",
             data=payload,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=RETRY.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=min(RETRY.timeout, remaining)) as resp:
                 body = json.loads(resp.read())
+            answered = True
             break
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:300]
@@ -277,14 +303,25 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
             wait = float(exc.headers.get("retry-after") or 0) or min(
                 RETRY.backoff_initial * 2**attempt, RETRY.backoff_max
             )
-            time.sleep(min(wait, RETRY.backoff_max))
-        except urllib.error.URLError as exc:
-            last = TransportError(f"gateway unreachable: {exc.reason}")
+        except OSError as exc:
+            # URLError, and a timeout raised mid-read, which urllib does not wrap:
+            # both mean no answer, and callers only catch TransportError.
+            last = TransportError(f"gateway unreachable: {getattr(exc, 'reason', exc)}")
             if attempt == RETRY.max_retries:
                 raise last from exc
-            time.sleep(min(RETRY.backoff_initial * 2**attempt, RETRY.backoff_max))
+            wait = min(RETRY.backoff_initial * 2**attempt, RETRY.backoff_max)
+        wait = min(wait, RETRY.backoff_max)
+        if wait >= DEADLINE_S - (time.monotonic() - started):
+            # A Retry-After that outlasts the deadline cannot be honoured here;
+            # sleeping into it only delays the same failure.
+            break
+        time.sleep(wait)
     else:  # pragma: no cover - loop always breaks or raises
         raise last or TransportError("gateway call failed")
+    if not answered:
+        raise TransportError(
+            f"no answer within {DEADLINE_S:g}s ({last or 'deadline reached'})"
+        )
 
     latency_ms = int((time.monotonic() - started) * 1000)
     _validate(wire, body)

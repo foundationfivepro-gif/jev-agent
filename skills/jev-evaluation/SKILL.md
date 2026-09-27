@@ -80,4 +80,23 @@ questions, and slice state so each batch carries only its own items.
 split differently moved recall 7/8 → 6/8. Re-score top candidates together before deciding.
 
 Errors: gateway 400/503, direct 422/529. A 429 carries `Retry-After: 60`; a backoff capped
-below that burns the budget without ever waiting long enough.
+below that burns the budget without ever waiting long enough — and one that honours it
+stalls an agent for a minute. `decide()` gives up at `JEV_DEADLINE_S` (15s) instead;
+raise it for offline batch jobs that can afford to wait.
+
+## When Jev is silent
+
+No answer at all is a normal outcome, and a checker with no branch for it stops the
+pipeline. Decide the no-answer default before writing the
+call, and pick it from what being wrong costs:
+
+| the decision | no answer means | tool behaviour |
+|---|---|---|
+| irreversible or outbound action | human review | `jev_check_action`, `jev_gate_command` fail closed |
+| scheduled run | proceed | `jev_should_run` fails open |
+| model route | unset; session default | `jev_route_model` error names it |
+| which files to read | Grep/Glob, read the matches | `jev_select_context` error names it |
+| your own `jev_evaluate` | the default you chose | error says so |
+
+Every "Jev unreachable" error ends with `Fallback:`. Apply it and continue. Never read
+silence as yes, and never as a reason to stop.
