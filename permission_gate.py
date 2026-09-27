@@ -175,19 +175,124 @@ def operator_allow(command: str, cwd: str, now: datetime | None = None) -> dict 
     return None
 
 
+# Where a command's effect leaves this machine: it sends, publishes or deploys.
+# Only these are worth a Jev call. Everything else is local work (builds, tests,
+# git commits, installs, file edits) and goes straight to Claude Code's own
+# permission flow: a Jev "review" there is a manual approval for nothing.
+REMOTE = {
+    "curl", "wget", "ssh", "scp", "sftp", "ftp", "rsync", "nc", "ncat", "telnet",
+    "gh", "vercel", "netlify", "fly", "flyctl", "heroku", "wrangler", "firebase",
+    "aws", "gcloud", "az", "kubectl", "helm", "terraform", "pulumi", "twine",
+    "mail", "sendmail", "osascript",
+}
+# Tools that are local except for these subcommands.
+REMOTE_SUBCOMMANDS = {
+    "git": {"push", "send-email"},
+    "npm": {"publish", "deprecate", "unpublish"},
+    "pnpm": {"publish"},
+    "yarn": {"publish", "npm"},
+    "docker": {"push", "login"},
+    "cargo": {"publish"},
+    "gem": {"push"},
+    "poetry": {"publish"},
+    "uv": {"publish"},
+}
+_REMOTE_TEXT = re.compile(
+    r"\b(?:" + "|".join(sorted(map(re.escape, REMOTE))) + r")\b"
+    r"|\b(?:" + "|".join(REMOTE_SUBCOMMANDS) + r")\b[^|;&]*\b(?:"
+    + "|".join(sorted({s for v in REMOTE_SUBCOMMANDS.values() for s in v})) + r")\b",
+    re.IGNORECASE,
+)
+
+# Deletions that are ordinary local work unless they target root, home or a bare wildcard.
+DELETES = {"rm", "rmdir", "unlink"}
+_DELETE_ROOT = re.compile(
+    r"\b(?:rm|rmdir|unlink)\b\s+(?:-\S+\s+)*(?:/|~|\$HOME|\*)(?=\s|$|['\"])"
+    r"|\bfind\s+(?:/|~|\$HOME)(?=\s)",
+    re.IGNORECASE,
+)
+
+
+# Global options that take a value before the subcommand: `git -C dir push`.
+_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--prefix", "--cwd", "-w", "--workspace"}
+
+
+def _subcommand(argv: list[str]) -> str:
+    """First argument after the binary that is neither a flag nor a flag's value."""
+    args = iter(argv[1:])
+    for arg in args:
+        if arg in _VALUE_OPTS:
+            next(args, None)
+        elif not arg.startswith("-"):
+            return arg.lower()
+    return ""
+
+
+def reaches_outside(command: str) -> bool:
+    """True when the command sends, publishes or deploys. Unparseable lines are read as text."""
+    try:
+        for segment in SEPARATORS.split(command):
+            argv = shlex.split(segment)
+            while argv and _basename(argv[0]) in WRAPPERS:
+                # `sudo -u x scp`: flag values are indistinguishable from the command,
+                # so resume at the first token that names a tool we care about.
+                rest = argv[1:]
+                known = [i for i, a in enumerate(rest)
+                         if _basename(a) in REMOTE or _basename(a) in REMOTE_SUBCOMMANDS]
+                argv = rest[known[0]:] if known else [a for a in rest if not a.startswith("-")]
+            if not argv:
+                continue
+            name = _basename(argv[0])
+            if name in SHELLS:
+                return bool(_REMOTE_TEXT.search(segment))
+            if name in REMOTE or _subcommand(argv) in REMOTE_SUBCOMMANDS.get(name, ()):
+                return True
+        return False
+    except ValueError:
+        return bool(_REMOTE_TEXT.search(command))
+
+
+def triage(command: str) -> tuple[str, str]:
+    """
+    ('block' | 'local' | 'external', reason), with no model call.
+
+    block     irreversible whatever the context: deny it.
+    local     the effect stays on this machine: no Jev call and no prompt from us.
+    external  sends, publishes or deploys: worth a Jev judgement.
+
+    A deletion inside the workspace, or a line shlex cannot split (an apostrophe
+    in a heredoc), is local work, not a reason to stop someone.
+    """
+    binaries = extract_commands(command)
+    for binary in binaries:
+        if binary in HARD_BLOCK - DELETES:
+            return "block", f"blocked binary: {binary}"
+    for pattern, label in DANGEROUS_PATTERNS:
+        if not label.startswith("find ") and re.search(pattern, command, re.IGNORECASE):
+            return "block", f"dangerous construct: {label}"
+    if _DELETE_ROOT.search(command) and (
+        DELETES.intersection(binaries) or "__unparseable__" in binaries or re.search(r"\bfind\b.*(-delete|-exec\s+rm)\b", command)
+    ):
+        return "block", "recursive delete of root, home or wildcard"
+    if reaches_outside(command):
+        return "external", "reaches past this machine"
+    return "local", "local command; no Jev call"
+
+
 def gate(command: str, cwd: str = ".") -> dict:
     """
     Decide allow / review / block for one command.
 
     Order is deliberate: deterministic denial first, model judgement second,
-    conservative conversion third. Jev can downgrade allow to review but can
+    conservative conversion third. Callers skip this for `triage` == 'local'.
+    Jev can downgrade allow to review but can
     never upgrade a hard block.
     """
     if not command.strip():
         return {"final": "block", "reason": "empty command", "proposed": None}
 
-    reason = hard_block_reason(command)
-    if reason:
+    kind, reason = triage(command)
+    if kind == "block":
         decision = {"proposed": None, "final": "block", "reason": reason, "source": "policy"}
         write_trace("permission", {"command": command, "cwd": cwd}, decision)
         return decision

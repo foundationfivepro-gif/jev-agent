@@ -57,7 +57,7 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 |---|---|---|
 | `SessionStart` | `session` | one line, `jev hooks active: ...`, telling the policy that gating and routing are enforced here; local, no call |
 | `UserPromptSubmit` | `prompt` | one Jev call per prompt; a one-line note only when repository context is needed |
-| `PreToolUse` on `Bash` | `gate-bash` | `jev_gate_command`; a hard block is deterministic and needs no key |
+| `PreToolUse` on `Bash` | `gate-bash` | local commands: no Jev call, no prompt. Outbound ones (push, curl, deploy, publish): `jev_gate_command`. Denying the irreversible is deterministic and needs no key |
 | `PreToolUse` on `Agent\|Task` | `route-agent` | appends the return contract (local, no key); sets `model` via `jev_route_model` when none was chosen |
 | `PostToolUse` / `PostToolUseFailure` on `Agent\|Task` | `agent-outcome` | records whether the subagent returned or failed, keyed by `tool_use_id`; local, no call |
 
@@ -106,7 +106,8 @@ condition in your claude.ai personal preferences (Settings → Profile):
 > call jev_check_action. Before sending file contents to an outside service, call
 > jev_classify_data; secret means stop. Before reading files to find something, call
 > jev_select_context. Unless the session context says "jev hooks active": call
-> jev_gate_command before shell commands (never run a policy block; model verdicts are advice), and
+> jev_gate_command before shell commands that send, publish or deploy (never run
+> a policy block; model verdicts are advice; local commands need no call), and
 > jev_route_model before delegating (use the model it selects).
 
 There the tools come from the remote connector (`remote_server.py`, below).
@@ -148,7 +149,7 @@ or runs commands. `./install.sh mcp` prints the registration.
 | `jev_check_action` | before any action with external effect, against plain-English policy |
 | `jev_file_outline` | exported symbols without loading the file; local-only |
 | `jev_evaluate` | arbitrary typed decisions |
-| `jev_gate_command` | the Bash hook runs it; call directly only where no hook runs |
+| `jev_gate_command` | commands that send, publish or deploy; the Bash hook runs it, so call directly only where no hook runs |
 | `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Fable is escalation-only |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
 

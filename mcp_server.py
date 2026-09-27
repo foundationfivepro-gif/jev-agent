@@ -35,7 +35,7 @@ import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
 from core import Choice, Noul, Score, TransportError, active_transport, decide  # noqa: E402
 from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
-from permission_gate import extract_commands, gate, hard_block_reason  # noqa: E402
+from permission_gate import extract_commands, gate, triage  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
 
@@ -45,7 +45,8 @@ mcp = MCPServer(
         "Call jev_select_context BEFORE reading a repository's files (200k tokens -> 4k). "
         "Call jev_classify_data before sending file contents to a third party. Shell "
         "commands and subagent spawns are gated and routed by hooks; call jev_gate_command "
-        "or jev_route_model yourself only where no hook runs. These tools never act."
+        "(only for commands that send, publish or deploy) or jev_route_model yourself only "
+        "where no hook runs. These tools never act."
     ),
 )
 
@@ -258,20 +259,21 @@ def jev_gate_command(
     cwd: Annotated[str, Field(default=".", description="Working directory it would run in.")] = ".",
 ) -> CommandDecision:
     """
-    Whether a shell command is safe: allow, review or block. The Bash hook already
-    runs this on every command; call it only where no hook runs. Deterministic
-    rules (rm -rf, sh -c, sudo) run first; never execute a block whose source is
-    'policy'. A model review or block is advice, never a veto: if the user's
+    Whether a command that sends, publishes or deploys is safe: allow, review or
+    block. Local commands (builds, tests, commits, installs, workspace deletes)
+    need no call: they return allow without reaching Jev. Only rm of root, home
+    or a wildcard and a few irreversible constructs block (source 'policy'); never
+    execute those. A model review or block is advice, never a veto: if the user's
     permission mode already allows the command (e.g. Bypass permissions), run it;
     otherwise ask once for the batch and quote the reason.
     """
     if not command.strip():
         raise ValueError("command is empty")
 
-    blocked = hard_block_reason(command)
-    if blocked:
+    kind, reason = triage(command)
+    if kind != "external":
         return CommandDecision(
-            decision="block", reason=blocked,
+            decision="block" if kind == "block" else "allow", reason=reason,
             binaries=extract_commands(command), source="policy",
         )
 
