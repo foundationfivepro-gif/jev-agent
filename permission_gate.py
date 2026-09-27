@@ -74,6 +74,23 @@ EXTERNAL = {
 
 SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
 
+# `NAME=value` before a command sets its environment; it is not the command.
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _skip_prefix(argv: list[str]) -> list[str]:
+    """Drop leading environment assignments and wrappers (with their flags): what runs is after them."""
+    while argv:
+        if _ASSIGNMENT.match(argv[0]):
+            argv = argv[1:]
+        elif _basename(argv[0]) in WRAPPERS:
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[1:]
+        else:
+            break
+    return argv
+
 # A heredoc: `<<EOF`, `<<-'EOF'`, `<<"EOF"`. Group 3 is the body, up to the terminator line.
 _HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1[^\n]*\n(.*?)^[ \t]*\2[ \t]*$", re.S | re.M)
 _SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
@@ -180,10 +197,7 @@ def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
             argv = shlex.split(segment)
         except ValueError:
             continue
-        while argv and _basename(argv[0]) in WRAPPERS:
-            argv = argv[1:]
-            while argv and argv[0].startswith("-"):
-                argv = argv[1:]
+        argv = _skip_prefix(argv)
         if not argv:
             continue
         name = _basename(argv[0])
@@ -246,6 +260,9 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
         i = 0
         while i < len(argv):
             name = _basename(argv[i])
+            if _ASSIGNMENT.match(argv[i]):
+                i += 1                # `FOO=bar npm run x` runs npm
+                continue
             if name in WRAPPERS:
                 i += 1
                 while i < len(argv) and argv[i].startswith("-"):
@@ -370,6 +387,8 @@ def reaches_outside(command: str) -> bool:
     try:
         for segment in _segments(_strip_heredocs(command)[0]):
             argv = shlex.split(segment)
+            while argv and _ASSIGNMENT.match(argv[0]):
+                argv = argv[1:]
             while argv and _basename(argv[0]) in WRAPPERS:
                 # `sudo -u x scp`: flag values are indistinguishable from the command,
                 # so resume at the first token that names a tool we care about.
