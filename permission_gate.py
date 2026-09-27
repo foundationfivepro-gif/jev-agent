@@ -212,16 +212,27 @@ def _reads_stdin_script(argv: list[str]) -> bool:
     if _basename(argv[0]) not in SHELLS or _shell_payload(argv) is not None:
         return False
     args = iter(argv[1:])
+    options_done = False
     for a in args:
         if (m := _REDIRECT.match(a)):
             if not m.group(1):
                 next(args, None)                # `2> /dev/null`: the target is the next token
             continue
+        if options_done:
+            return False                        # `bash -- script.sh`
         if a == "--":
-            return next(args, None) is None     # `bash -- script.sh`; -s would have returned above
+            options_done = True
+            continue
+        if a in ("--rcfile", "--init-file"):
+            next(args, None)
+            continue
         if a.startswith("-") or a.startswith("+"):
-            if not a.startswith("--") and "s" in a[1:]:
+            if a.startswith("--"):
+                continue
+            if "s" in a[1:]:
                 return True                     # -s: script from stdin, the rest are $1...
+            if a[-1] in "oO":
+                next(args, None)                # `-o pipefail`, `-eo pipefail`, `+O extglob`
             continue
         return False                            # a script file operand
     return True
@@ -272,6 +283,19 @@ def _unquoted_at(command: str, start: int, index: int) -> bool:
     return quote is None
 
 
+def _in_arithmetic(text: str) -> bool:
+    """Whether the end of `text` is inside an unclosed `$((...))`, where << is a shift."""
+    depth, i = 0, 0
+    while i < len(text):
+        if text.startswith("$((", i):
+            depth, i = depth + 1, i + 3
+        elif text.startswith("))", i) and depth:
+            depth, i = depth - 1, i + 2
+        else:
+            i += 1
+    return depth > 0
+
+
 def _strip_heredocs(command: str) -> tuple[str, list[str]]:
     """
     The command without heredoc bodies, plus the parts of those bodies that execute.
@@ -291,7 +315,7 @@ def _strip_heredocs(command: str) -> tuple[str, list[str]]:
         body_start = command.find("\n", m.end())
         if (body_start < 0 or not _strip_comments(prefix + "<<").endswith("<<")
                 or not _unquoted_at(command, pos, m.start())
-                or _lift_substitutions(command[pos:m.start()] + ")")[0].count("$((") > 0):
+                or _in_arithmetic(command[pos:m.start()])):
             search = m.end()
             continue
         body_start += 1
