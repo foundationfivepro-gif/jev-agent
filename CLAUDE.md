@@ -15,15 +15,15 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 
 ## With `jev hooks active`, the hooks do these
 
-- **Bash**: only outbound commands reach `jev_gate_command`; its `deny` or `ask` stands.
+- **Bash**: outbound commands reach Jev, which never prompts; only its `deny` stands.
 - **Agent spawns** without a `model` are routed by `jev_route_model`, and every subagent
   prompt gets a return contract (conclusion only, file:line references). Set `model`
   yourself only when you know better; the hook keeps it.
 
 ## Without it, do them yourself
 
-- Before an outbound command (`git push`, `curl`, `gh`, deploy, publish):
-  `jev_gate_command`. Never run `review` or `block`. Local commands need no call.
+- Before an outbound command (push, curl, deploy): `jev_gate_command`.
+  Never run a `policy` block; a model verdict is advice to the permission mode.
 - Before delegating: `jev_route_model`; use `selected` as the model (`human`: don't
   delegate), and end the subagent prompt by asking for the conclusion only.
 
@@ -35,7 +35,7 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 - Fable is escalation-only. Do not pick it, and do not second-guess the router downward.
 
 Prompt text and command lines go to Jev through the gateway; anything credential-shaped
-is held back locally and becomes `ask`.
+is held back locally.
 
 ## Verify
 
