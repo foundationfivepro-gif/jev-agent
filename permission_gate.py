@@ -161,6 +161,18 @@ def _lift_substitutions(command: str, *, quotes: bool = True) -> tuple[str, list
                     inner = None if ch == inner else inner
                 elif ch in "'\"":
                     inner = ch
+                elif ch == "<" and (h := _HEREDOC_OP.match(command, j)) and (nl := command.find("\n", h.end())) >= 0:
+                    # `$(cat <<'EOF' ... EOF)`: skip the body, where `:)` or `1)` is prose
+                    delim = h.group(2) or h.group(3) or h.group(4)
+                    cursor, j = nl + 1, n           # unterminated: the rest is body
+                    while cursor < n:
+                        eol = command.find("\n", cursor)
+                        eol = n if eol < 0 else eol
+                        if (command[cursor:eol].lstrip("\t") if h.group(1) else command[cursor:eol]) == delim:
+                            j = eol                 # resume at the end of the terminator line
+                            break
+                        cursor = eol + 1
+                    continue
                 else:
                     depth += {"(": 1, ")": -1}.get(ch, 0)
                 j += 1
@@ -217,6 +229,11 @@ def _reads_stdin_script(argv: list[str]) -> bool:
     args = iter(argv[1:])
     options_done = False
     for a in args:
+        if a == "<<<":
+            next(args, None)                    # here-string: stdin, not a script file
+            continue
+        if a.startswith("<<<"):
+            continue
         if (m := _REDIRECT.match(a)):
             if not m.group(1):
                 next(args, None)                # `2> /dev/null`: the target is the next token
@@ -239,6 +256,13 @@ def _reads_stdin_script(argv: list[str]) -> bool:
             continue
         return False                            # a script file operand
     return True
+
+
+def _split_lenient(segment: str) -> list[str]:
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
 
 
 def _find_exec_payloads(argv: list[str]) -> list[list[str]]:
@@ -352,7 +376,11 @@ def _strip_heredocs(command: str) -> tuple[str, list[str]]:
         except ValueError:
             head = head_text.split()
         head = _skip_prefix(head)
-        if head and _reads_stdin_script(head):
+        # `cat <<'EOF' | bash`: the rest of the operator's line pipes the body into a shell
+        piped_to_shell = any(
+            was_piped and _reads_stdin_script(_skip_prefix(_split_lenient(seg)) or ["_"])
+            for seg, was_piped in _segments("_ " + command[m.end():body_start - 1], pipes=True))
+        if (head and _reads_stdin_script(head)) or piped_to_shell:
             executed.append(body)
         elif not quoted:
             executed.extend(_lift_substitutions(body, quotes=False)[1])
@@ -459,6 +487,15 @@ def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
             payloads.append(" ".join(argv[1:]))
         elif name in SHELLS and (payload := _shell_payload(argv)) is not None:
             payloads.append(payload)
+        elif name in SHELLS and "<<<" in argv[:-1] and _reads_stdin_script(argv):
+            payloads.append(argv[argv.index("<<<") + 1])
+    for pipeline in _pipelines(text):
+        for k, argv in enumerate(pipeline):
+            if k and _reads_stdin_script(argv):
+                for earlier in pipeline[:k]:
+                    if _basename(earlier[0]) in ("echo", "printf"):
+                        text_out = " ".join(a for a in earlier[1:] if not a.startswith("-"))
+                        payloads.append(text_out.replace("\\n", "\n"))   # printf / echo -e escapes
     texts = [_mask_quotes(text)]
     for payload in payloads:
         texts.extend(executable_texts(payload, _depth=_depth + 1))
@@ -575,11 +612,12 @@ def _dangerous(command: str, *, skip_find: bool = False) -> str | None:
 
 
 def _basename(token: str) -> str:
-    """Strip any path and extension so /usr/bin/rm and C:\\bin\\rm.exe both read as 'rm'."""
+    """Strip any path and extension so /usr/bin/rm and C:\\bin\\rm.exe both read as 'rm'; mkfs.ext4 is mkfs."""
     name = PurePosixPath(token).name
     if "\\" in token:                       # Windows-style path
         name = PureWindowsPath(token).name
-    return name.lower().removesuffix(".exe")
+    name = name.lower().removesuffix(".exe")
+    return "mkfs" if name.startswith("mkfs.") else name
 
 
 def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
@@ -700,7 +738,7 @@ _REMOTE_TEXT = re.compile(
 DELETES = {"rm", "rmdir", "unlink"}
 # rm is judged per operand in _argv_danger; this catches find walking root or home to delete.
 _FIND_ROOT_DELETE = re.compile(
-    r"\bfind\s+(?:/|~|\$HOME)(?=\s)[^|;&]*(?:-delete\b|-exec\s+rm\b)", re.IGNORECASE,
+    r"\bfind\s+(?:/|~/?|\$HOME/?|\$\{HOME\}/?)(?=\s)[^|;&]*(?:-delete\b|-exec\s+rm\b)", re.IGNORECASE,
 )
 
 
@@ -719,10 +757,33 @@ def _subcommand(argv: list[str]) -> str:
     return ""
 
 
+def _unwrap_runner(argv: list[str]) -> list[str]:
+    """`npx vercel@latest --prod` runs vercel; so do `pnpm dlx`, `yarn dlx`, `bunx`, `npm exec --`, `python -m`."""
+    name = _basename(argv[0])
+    if name in ("npx", "bunx"):
+        rest = argv[1:]
+    elif name in ("pnpm", "yarn") and argv[1:2] == ["dlx"]:
+        rest = argv[2:]
+    elif name == "npm" and argv[1:2] in (["exec"], ["x"]):
+        rest = argv[2:]
+    elif name.startswith("python") and "-m" in argv[1:-1]:
+        return argv[argv.index("-m") + 1:]
+    else:
+        return argv
+    rest = [a for a in rest if a != "--"]
+    while rest and rest[0].startswith("-"):
+        rest = rest[1:]
+    if rest:
+        head = rest[0]
+        rest = [head.rsplit("@", 1)[0] if head.rfind("@") > 0 else head] + rest[1:]
+    return rest or argv
+
+
 def reaches_outside(command: str) -> bool:
     """True when anything this command would run sends, publishes or deploys."""
     for text in executable_texts(command):
         for argv in _argvs(text):
+            argv = _unwrap_runner(argv)
             name = _basename(argv[0])
             if name in REMOTE or _subcommand(argv) in REMOTE_SUBCOMMANDS.get(name, ()):
                 return True

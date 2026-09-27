@@ -179,3 +179,26 @@ def test_review_round_5(command, expected):
 ])
 def test_review_round_6(command, expected):
     assert triage(command)[0] == expected, command
+
+
+# Independent Claude review after merge.
+@pytest.mark.parametrize("command,expected", [
+    ("gh pr comment 5 --body \"$(cat <<'EOF'\nLGTM :) \nThe fix: `git push -f` -> `git push --force-with-lease`\nEOF\n)\"", "external"),
+    ("gh pr create --title t --body \"$(cat <<'EOF'\n1) run `rm -rf ~` check it blocks\nEOF\n)\"", "external"),
+    ("git commit -m \"$(cat <<'EOF'\nfix (see #3)\n2) done\nEOF\n)\"", "local"),   # parens in heredoc prose
+    ("cat <<'EOF' | bash\nrm -rf ~\nEOF", "block"),                                  # text a shell reads runs
+    ("echo 'rm -rf ~' | bash", "block"),
+    ("printf 'rm -rf /\\n' | sh", "block"),
+    ("bash <<< 'rm -rf ~'", "block"),
+    ("echo hello | bash ./consumer.sh", "local"),
+    ("echo 'rm -rf ~' | grep rm", "local"),
+    ("mkfs.ext4 /dev/sdb1", "block"),                                                # mkfs.* is mkfs
+    ("find ~/ -name .DS_Store -delete", "block"),
+    ("find ./build -name '*.o' -delete", "local"),
+    ("npx vercel@latest --prod", "external"),                                         # package runners
+    ("python3 -m twine upload dist/*", "external"),
+    ("npx prettier --write .", "local"),
+    ("python3 -m pytest -q", "local"),
+])
+def test_independent_review(command, expected):
+    assert triage(command)[0] == expected, command
