@@ -152,6 +152,7 @@ or runs commands. `./install.sh mcp` prints the registration.
 | `jev_gate_command` | commands that send, publish or deploy; the Bash hook runs it, so call directly only where no hook runs |
 | `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Fable is escalation-only |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
+| `jev_route_skill` | which one skill should handle a request, or `none` (pick normally). Local reads installed skills; remote takes the list. Per-message suggestion: `python3 skill_router.py on` (default off). See `skills/skill-routing` |
 
 ## Universal reach: local vs remote
 
@@ -175,7 +176,7 @@ deliberately reduced:
 
 | tool | remote | why |
 |---|---|---|
-| `jev_evaluate`, `jev_should_run`, `jev_check_action`, `jev_gate_command` | yes | pure logic, judge what you pass them |
+| `jev_evaluate`, `jev_should_run`, `jev_check_action`, `jev_gate_command`, `jev_route_skill` | yes | pure logic, judge what you pass them (the skill list is passed in) |
 | `jev_select_context` | **no** | its saving comes from reading *your* repository; a remote version would have to upload the codebase to answer the same question |
 | `jev_file_outline` | **no** | same reason |
 | `jev_classify_data` → `jev_classify_paths` | reduced | the local version scans file **content** and never transmits it. A remote content scanner requires uploading the material it exists to protect — worse than none, because it is trusted. The remote variant takes paths only, and says so in its output |

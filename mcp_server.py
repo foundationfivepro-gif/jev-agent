@@ -185,6 +185,20 @@ class ModelRouteDecision(BaseModel):
     )
 
 
+class SkillRouteDecision(BaseModel):
+    """Which one skill should handle a request, or 'none'."""
+
+    selected: str = Field(description=(
+        "Load this skill. 'none' means pick the normal way: nothing cleared the bar, "
+        "Jev was unavailable or slow, or no listed skill fits."))
+    proposed: str | None = Field(description="What Jev proposed before the confidence bar.")
+    confidence: float = Field(description="Jev's certainty in `proposed`, 0..1.")
+    reason: str
+    source: Literal["policy", "model", "timeout", "unavailable"]
+    note: str | None = Field(description="The one line to tell the user; null when 'none'.")
+    latency_ms: int
+
+
 # ----------------------------------------------------------------------- tools
 
 
@@ -536,6 +550,38 @@ def jev_route_model(
         probabilities={k: round(float(v), 3) for k, v in (d.get("probabilities") or {}).items()},
         source=d.get("source", "model"),
         cost_per_mtok={"in": chosen.get("cost_in", 0.0), "out": chosen.get("cost_out", 0.0)},
+    )
+
+
+@mcp.tool(
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": True},
+)
+def jev_route_skill(
+    request: Annotated[str, Field(description="The user's request, as they wrote it.")],
+    project: Annotated[str | None, Field(default=None, description=(
+        "Project directory whose .claude/skills and skills/ are included. Omit for "
+        "user and plugin skills only."
+    ))] = None,
+    skills: Annotated[dict[str, str] | None, Field(default=None, description=(
+        "Optional {name: one-line description} to choose from instead of the "
+        "installed skills."
+    ))] = None,
+) -> SkillRouteDecision:
+    """
+    Which one installed skill should handle a request, or 'none'. Only points:
+    never runs a skill. On 'none', pick the skill the normal way.
+    """
+    import skill_router
+
+    d = skill_router.route_skill(request, skills, project=project)
+    return _skill_decision(d, skill_router.note(d))
+
+
+def _skill_decision(d: dict, note: str | None) -> SkillRouteDecision:
+    return SkillRouteDecision(
+        selected=d["selected"], proposed=d.get("proposed"), confidence=d["confidence"],
+        reason=d["reason"], source=d["source"], note=note, latency_ms=d["latency_ms"],
     )
 
 

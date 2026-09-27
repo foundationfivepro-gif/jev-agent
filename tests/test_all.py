@@ -361,7 +361,8 @@ def test_every_module_has_a_skill_or_is_internal():
         open(os.path.join(root, "skills", d, "SKILL.md")).read()
         for d in os.listdir(os.path.join(root, "skills"))
     )
-    for term in ("should_run", "check_action", "include, index", "jev_route_model"):
+    for term in ("should_run", "check_action", "include, index", "jev_route_model",
+                 "jev_route_skill"):
         assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"
 
 
@@ -379,7 +380,8 @@ def test_remote_server_excludes_filesystem_tools():
     assert "jev_select_context" not in names
     assert "jev_file_outline" not in names
     assert names == {"jev_evaluate", "jev_should_run", "jev_check_action",
-                     "jev_gate_command", "jev_route_model", "jev_classify_paths"}
+                     "jev_gate_command", "jev_route_model", "jev_classify_paths",
+                     "jev_route_skill"}
 
 
 def test_remote_never_accepts_file_content():

@@ -14,7 +14,9 @@ repositories whose CLAUDE.md says so.
                                             hooked session from one with no hooks,
                                             such as Cowork. Local; no call.
     UserPromptSubmit          prompt        one Jev call per prompt; a one-line note
-                                            only when repository context is needed
+                                            only when repository context is needed.
+                                            With `skill_router.py on` (default off),
+                                            also names the skill Jev picked; 500ms cap.
     PreToolUse   Bash         gate-bash     denies the irreversible (no key needed);
                                             runs jev_gate_command only on commands that
                                             send, publish or deploy. Local commands get
@@ -414,6 +416,11 @@ def prompt(data: dict) -> None:
     if len(text) < 20 or _looks_secret(text) or not _have_key():
         return
 
+    notes = []
+    skill = _skill_note(text, data)
+    if skill:
+        notes.append(skill)
+
     from core import UNTRUSTED, Noul, Score, TransportError, decide
 
     try:
@@ -428,16 +435,31 @@ def prompt(data: dict) -> None:
             ),
         })
     except TransportError:
-        return
+        r = None
 
     # Injected text stays in context for the rest of the session, so the note
     # is sent only when it changes what Claude does next: read files through
     # jev_select_context rather than one by one.
-    if float(r.answers["repo"].value) < 0.5:
-        return
-    label = COMPLEXITY[max(0, min(3, round(float(r.value("complexity")))))]
-    note = f"jev: {label} task; call jev_select_context before reading files."
-    _emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": note}})
+    if r is not None and float(r.answers["repo"].value) >= 0.5:
+        label = COMPLEXITY[max(0, min(3, round(float(r.value("complexity")))))]
+        notes.append(f"jev: {label} task; call jev_select_context before reading files.")
+    if notes:
+        _emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                      "additionalContext": "\n".join(notes)}})
+
+
+def _skill_note(text: str, data: dict) -> str | None:
+    """One line naming the skill Jev picked, when the switch is on (`skill_router.py on`)."""
+    try:
+        import skill_router
+
+        if not skill_router.enabled():
+            return None
+        project = data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
+        return skill_router.note(skill_router.route_skill(text, project=project))
+    except Exception as exc:  # a suggestion is never worth a failed prompt
+        print(f"jev skill router: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
 
 
 # ------------------------------------------------------------------- install

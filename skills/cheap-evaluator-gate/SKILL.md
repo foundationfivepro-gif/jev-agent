@@ -16,6 +16,7 @@ API; this is about when the trade pays.
 **Where it pays.** Relevance-score before reading (the highest-leverage gate — reading is the
 largest consumer). Verify a compression kept the facts the next step needs. Route among many
 tools without putting every schema in context. Score a proposed command against policy.
+Choosing among many skills: see `skill-routing` (`jev_route_skill`).
 
 **Batch, because only input is billed.** All questions in one request run in parallel against
 shared state. Score 40 files in one call with 40 questions, not 40 calls.
