@@ -78,6 +78,52 @@ SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
+def _lift_substitutions(command: str) -> tuple[str, list[str]]:
+    """
+    The command with each `$(...)` and backtick span replaced by `_`, plus their contents.
+
+    Those spans run before the command they sit in, so `echo $(rm -rf ~)` runs
+    rm. Single-quoted text is literal and left alone; double quotes do not stop
+    a substitution. Nesting is balanced, so `$(a $(b))` is one span.
+    """
+    out, found, i, quote = [], [], 0, None
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote == "'":
+            quote = None if c == "'" else quote
+            out.append(c)
+            i += 1
+            continue
+        if c == "'" and quote is None:
+            quote = "'"
+        elif c == '"':
+            quote = None if quote == '"' else '"'
+        if c == "$" and command[i + 1:i + 2] == "(" and command[i + 2:i + 3] != "(":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(command[j], 0)
+                j += 1
+            found.append(command[i + 2:j - 1] if not depth else command[i + 2:])
+            out.append("_")
+            i = j
+            continue
+        if c == "`":
+            j = command.find("`", i + 1)
+            j = n if j < 0 else j
+            found.append(command[i + 1:j])
+            out.append("_")
+            i = j + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), found
+
+
 def _skip_prefix(argv: list[str]) -> list[str]:
     """Drop leading environment assignments and wrappers (with their flags): what runs is after them."""
     while argv:
@@ -191,7 +237,7 @@ def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
         return [command]
     text, bodies = _strip_heredocs(command)
     masked, payloads = _mask_quotes(text)
-    payloads += bodies
+    payloads += bodies + _lift_substitutions(text)[1]
     for segment in _segments(text):
         try:
             argv = shlex.split(segment)
@@ -246,9 +292,13 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
 
     found: list[str] = []
     text, bodies = _strip_heredocs(command)
-    for body in bodies:
+    text, substitutions = _lift_substitutions(text)
+    for body in bodies + substitutions:
         found.extend(extract_commands(body, _depth=_depth + 1))
     for segment in _segments(text):
+        segment = segment.lstrip("({ \t").rstrip(")} \t")    # `(rm x)`, `{ rm x; }`
+        if not segment:
+            continue
         try:
             argv = shlex.split(segment)
         except ValueError:
@@ -361,7 +411,7 @@ _REMOTE_TEXT = re.compile(
 # Deletions that are ordinary local work unless they target root, home or a bare wildcard.
 DELETES = {"rm", "rmdir", "unlink"}
 _DELETE_ROOT = re.compile(
-    r"\b(?:rm|rmdir|unlink)\b\s+(?:-\S+\s+)*(?:/|~|\$HOME|\*)(?=\s|$|['\"])"
+    r"\b(?:rm|rmdir|unlink)\b\s+(?:-\S+\s+)*(?:/|~|\$HOME|\*)(?=[\s);}`]|$|['\"])"
     r"|\bfind\s+(?:/|~|\$HOME)(?=\s)",
     re.IGNORECASE,
 )
