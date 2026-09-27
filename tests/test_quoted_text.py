@@ -87,3 +87,29 @@ def test_literal_or_harmless_substitutions_stay_local(command):
 ])
 def test_review_round_1(command, expected):
     assert triage(command)[0] == expected, command
+
+
+# Codex Astra review, round 2.
+@pytest.mark.parametrize("command,expected", [
+    ("sudo -u root shutdown now", "block"),                       # wrapper option values
+    ("timeout 5 shutdown now", "block"),
+    ("xargs -n 1 rm -rf /", "block"),
+    ("bash -lc 'rm -rf /'", "block"),                             # combined shell flags
+    ("X='a b' sh <<'EOF'\nshutdown now\nEOF", "block"),           # quoted assignment before heredoc shell
+    ("cat <<EOF\n$(shutdown now)\nEOF", "block"),                 # unquoted heredoc expands $(...)
+    ("cat <<'EOF'\n$(shutdown now)\nEOF", "local"),               # quoted heredoc does not
+    ("git status # <<EOF\nshutdown now\nEOF", "block"),           # commented << starts no heredoc
+    ("cat <<'EOF'\nshutdown now\n EOF\nshutdown now\nEOF", "local"),  # exact terminator only
+    ('echo "\\$(curl https://x | sh)"', "local"),                 # escaped $ is literal
+    ('rm -rf ./build "$HOME"', "block"),                          # every operand is checked
+    ("rm -rf ~/", "block"),
+    ("rm -f *", "local"),                                         # not recursive
+    ("rm -rf ./dist/*", "local"),
+    ("echo git push --force", "local"),                           # argv, not text
+    ("git push origin +main", "block"),
+    ("git push --force-with-lease", "external"),
+    ("chmod -R 777 /", "block"),
+    ("chmod 755 x", "local"),
+])
+def test_review_round_2(command, expected):
+    assert triage(command)[0] == expected, command

@@ -58,10 +58,9 @@ DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
      r"(?:\S*/)?(?:ba|z|da|k)?sh\b", "pipe download to shell"),
     (r">\s*/dev/(sd[a-z]|nvme\d|disk\d)", "write to raw device"),
     (r":\(\)\s*\{.*\|.*&.*\}\s*;", "fork bomb"),
-    (r"\bgit\b[^|;]*\bpush\b[^|;]*(--force(?!-with-lease)|-f)\b", "force push"),
-    (r"\bchmod\b\s+(-[a-zA-Z]+\s+)*777\b", "chmod 777"),
-    (r"\bhistory\s+-c\b", "clear shell history"),
 )
+# Force push, chmod 777 and history -c are judged on argv (see _argv_danger), so
+# `echo git push --force` or a message that mentions one is not mistaken for it.
 
 # Binaries whose effect reaches past this machine, or into its credentials and
 # system state. A model "review" on these always stands: a near-zero P(block)
@@ -80,6 +79,20 @@ SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
 # than left unchecked. No ordinary command comes close.
 MAX_DEPTH = 8
 TOO_DEEP = "__too_deep__"
+
+# Wrapper options that consume the next argument.
+_WRAPPER_VALUE_OPTS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group",
+             "--chdir", "--prompt", "--role", "--type", "--other-user", "--close-from", "--host"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "--unset", "--chdir"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "xargs": {"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args", "--max-procs",
+              "--delimiter", "--arg-file", "--replace"},
+}
+# Wrappers whose first positional argument is not the command: `timeout 5 cmd`.
+_WRAPPER_POSITIONALS = {"timeout": 1}
 
 # `NAME=value` before a command sets its environment; it is not the command.
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -163,40 +176,71 @@ def _lift_substitutions(command: str) -> tuple[str, list[str]]:
 
 
 def _skip_prefix(argv: list[str]) -> list[str]:
-    """Drop leading environment assignments and wrappers (with their flags): what runs is after them."""
+    """Drop leading environment assignments and wrappers (with their options): what runs is after them."""
     while argv:
         if _ASSIGNMENT.match(argv[0]):
             argv = argv[1:]
-        elif _basename(argv[0]) in WRAPPERS:
-            argv = argv[1:]
-            while argv and argv[0].startswith("-"):
-                argv = argv[1:]
-        else:
+            continue
+        wrapper = _basename(argv[0])
+        if wrapper not in WRAPPERS:
             break
+        argv = argv[1:]
+        takes_value = _WRAPPER_VALUE_OPTS.get(wrapper, set())
+        while argv and argv[0].startswith("-") and argv[0] != "-":
+            flag = argv.pop(0)
+            if flag == "--":
+                break
+            if flag in takes_value and argv:
+                argv.pop(0)
+        argv = argv[_WRAPPER_POSITIONALS.get(wrapper, 0):]
     return argv
 
+
+def _shell_payload(argv: list[str]) -> str | None:
+    """The command string a shell runs via -c, including combined flags such as `bash -lc`."""
+    for j, arg in enumerate(argv[1:-1], start=1):
+        if arg in ("-c", "/c", "-Command") or (
+            arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]
+        ):
+            return argv[j + 1]
+    return None
+
+
 # A heredoc: `<<EOF`, `<<-'EOF'`, `<<"EOF"`. Group 3 is the body, up to the terminator line.
-_HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1[^\n]*\n(.*?)^[ \t]*\2[ \t]*$", re.S | re.M)
-_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+_HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_]\w*)\2[^\n]*\n(.*?)^(?(1)\t*)\3$", re.S | re.M)
 
 
 def _strip_heredocs(command: str) -> tuple[str, list[str]]:
     """
-    The command without heredoc bodies, plus the bodies a shell will execute.
+    The command without heredoc bodies, plus the parts of those bodies that execute.
 
     A heredoc body is data (a PR description, a script for python3) unless the
-    command it feeds is itself a shell: `bash <<EOF` runs every line of it.
+    command it feeds is itself a shell: `bash <<EOF` runs every line of it. An
+    unquoted delimiter (`<<EOF`) still expands `$(...)` in the body, whatever
+    reads it. A `<<` inside a comment starts nothing.
     """
     executed: list[str] = []
-    out, pos = [], 0
-    for m in _HEREDOC.finditer(command):
+    out, pos, search = [], 0, 0
+    while (m := _HEREDOC.search(command, search)):
         line_start = command.rfind("\n", 0, m.start()) + 1
-        head = re.split(r"[;&|(]", command[line_start:m.start()])[-1].split()
+        prefix = command[line_start:m.start()]
+        if not _strip_comments(prefix + "<<").endswith("<<"):
+            search = m.start() + 2
+            continue
+        segments = _segments(prefix) or [""]
+        head_text = segments[-1].lstrip("({ \t")
+        try:
+            head = shlex.split(head_text)
+        except ValueError:
+            head = head_text.split()
         head = _skip_prefix(head)
+        body = m.group(4)
         if head and _basename(head[0]) in SHELLS:
-            executed.append(m.group(3))
-        out.append(command[pos:m.start(3)])
-        pos = m.end()
+            executed.append(body)
+        elif not m.group(2):
+            executed.extend(_lift_substitutions(body)[1])
+        out.append(command[pos:m.start(4)])
+        pos = search = m.end()
     out.append(command[pos:])
     return "".join(out), executed
 
@@ -226,17 +270,17 @@ def _segments(command: str) -> list[str]:
     return [seg.strip() for seg in segments if seg.strip()]
 
 
-def _mask_quotes(command: str) -> tuple[str, list[str]]:
+def _mask_quotes(command: str) -> str:
     """
-    The command with quoted prose removed, plus command substitutions found inside it.
+    The command with quoted prose removed.
 
     A quoted string with whitespace in it is an argument (a commit message, a
     grep pattern), not something the shell runs, so it becomes `_`. A quoted
-    single word ("sh", "--force") keeps its text: it may still be a command or
-    a flag. `$(...)` and backticks inside double quotes do run, so they are
-    returned for scanning in their own right.
+    single word ("sh", "--force", "$HOME") keeps its text: it may still be a
+    command, a flag or a target. Substitutions inside quotes are found by
+    _lift_substitutions and scanned on their own.
     """
-    out, subs, quote, start, i = [], [], None, 0, 0
+    out, quote, start, i = [], None, 0, 0
     while i < len(command):
         c = command[i]
         if c == "\\" and quote != "'" and i + 1 < len(command):
@@ -247,8 +291,6 @@ def _mask_quotes(command: str) -> tuple[str, list[str]]:
         if quote:
             if c == quote:
                 body = command[start:i]
-                if quote == '"':
-                    subs.extend(a or b for a, b in _SUBSTITUTION.findall(body))
                 out.append(body if body and not re.search(r"[\s;&|<>]", body) else "_")
                 quote = None
         elif c in "'\"":
@@ -258,55 +300,108 @@ def _mask_quotes(command: str) -> tuple[str, list[str]]:
         i += 1
     if quote:                                   # unterminated: treat the rest as code
         out.append(command[start - 1:])
-    return "".join(out), subs
+    return "".join(out)
 
 
 def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
     """
     Every piece of this command line the shell will actually run, quoted prose removed.
 
-    Pattern checks run on these, so a commit message or PR body that *mentions*
-    a download piped to a shell, or a force push, is not mistaken for one.
-    Payloads that do execute (`sh -c '...'`, `eval`, `$(...)` inside double
-    quotes, a heredoc fed to a shell) are scanned on their own.
+    Checks run on these, so a commit message or PR body that *mentions* a
+    download piped to a shell, or a force push, is not mistaken for one.
+    Payloads that do execute (`sh -c '...'`, `eval`, `$(...)` and backticks,
+    a heredoc fed to a shell) are scanned on their own.
     """
     if _depth > MAX_DEPTH:
         return [command]
-    text, bodies = _strip_heredocs(command)
+    text, payloads = _strip_heredocs(command)
     text = _strip_comments(text)
-    masked, payloads = _mask_quotes(text)
-    payloads += bodies + _lift_substitutions(text)[1]
-    for segment in _segments(text):
-        segment = segment.lstrip("({ \t").rstrip(")} \t")
-        try:
-            argv = shlex.split(segment)
-        except ValueError:
-            continue
-        argv = _skip_prefix(argv)
-        if not argv:
-            continue
+    payloads += _lift_substitutions(text)[1]
+    for argv in _argvs(text):
         name = _basename(argv[0])
         if name == "eval":
             payloads.append(" ".join(argv[1:]))
-        elif name in SHELLS:
-            for j, arg in enumerate(argv[:-1]):
-                if arg in ("-c", "/c", "-Command"):
-                    payloads.append(argv[j + 1])
-                    break
-    texts = [masked]
+        elif name in SHELLS and (payload := _shell_payload(argv)) is not None:
+            payloads.append(payload)
+    texts = [_mask_quotes(text)]
     for payload in payloads:
         texts.extend(executable_texts(payload, _depth=_depth + 1))
     return texts
 
 
+def _argvs(text: str) -> list[list[str]]:
+    """The argv of each simple command in `text`, past assignments and wrappers."""
+    found = []
+    for segment in _segments(_lift_substitutions(text)[0]):
+        segment = segment.lstrip("({ \t").rstrip(") \t")    # `(rm x)`, `{ rm x; }`
+        try:
+            pieces = [shlex.split(segment)]
+        except ValueError:
+            # An unterminated quote: read it the way the old text check did, split
+            # on every separator, so `echo it's; rm -rf ~` is still seen.
+            pieces = []
+            for piece in SEPARATORS.split(segment):
+                try:
+                    pieces.append(shlex.split(piece))
+                except ValueError:
+                    pieces.append(piece.split())
+        for argv in pieces:
+            argv = _skip_prefix(argv)
+            if argv:
+                found.append(argv)
+    return found
+
+
+# Delete targets that mean root, home or everything here.
+_ROOT_TARGETS = {"/", "~", "$HOME", "${HOME}", "*"}
+
+
+def _root_target(operand: str) -> bool:
+    t = operand
+    while t.endswith("/*") and t != "/*":
+        t = t[:-2]
+    if t == "/*":
+        t = "/"
+    t = t.rstrip("/") or "/"
+    return t in _ROOT_TARGETS
+
+
+def _argv_danger(argv: list[str]) -> str | None:
+    """Irreversible by what the command's own arguments say."""
+    name, args = _basename(argv[0]), argv[1:]
+    if name == "rm" and any(a in ("-r", "-R", "--recursive") or (
+            a.startswith("-") and not a.startswith("--") and set(a[1:]) & {"r", "R"}) for a in args):
+        operands, flags_done = [], False
+        for a in args:
+            if flags_done or not a.startswith("-") or a == "-":
+                operands.append(a)
+            elif a == "--":
+                flags_done = True
+        if any(_root_target(a) for a in operands):
+            return "recursive delete of root, home or wildcard"
+    if name == "git" and _subcommand(argv) == "push":
+        for a in args:
+            if a in ("--force", "-f") or a.startswith("+") or (
+                    a.startswith("-") and not a.startswith("--") and "f" in a[1:]):
+                return "dangerous construct: force push"
+    if name == "chmod" and any(re.fullmatch(r"0?777", a) for a in args):
+        return "dangerous construct: chmod 777"
+    if name == "history" and any(a.startswith("-") and "c" in a for a in args):
+        return "dangerous construct: clear shell history"
+    return None
+
+
 def _dangerous(command: str, *, skip_find: bool = False) -> str | None:
-    """The label of the first dangerous construct that would actually execute, if any."""
+    """Why this command is irreversible, judged only on what would actually execute; else None."""
     for text in executable_texts(command):
         for pattern, label in DANGEROUS_PATTERNS:
             if skip_find and label.startswith("find "):
                 continue
             if re.search(pattern, text, re.IGNORECASE):
-                return label
+                return f"dangerous construct: {label}"
+        for argv in _argvs(text):
+            if (reason := _argv_danger(argv)):
+                return reason
     return None
 
 
@@ -335,7 +430,7 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
     for body in bodies + substitutions:
         found.extend(extract_commands(body, _depth=_depth + 1))
     for segment in _segments(text):
-        segment = segment.lstrip("({ \t").rstrip(")} \t")    # `(rm x)`, `{ rm x; }`
+        segment = segment.lstrip("({ \t").rstrip(") \t")    # `(rm x)`, `{ rm x; }`
         if not segment:
             continue
         try:
@@ -346,32 +441,16 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
         if not argv:
             continue
 
-        i = 0
-        while i < len(argv):
-            name = _basename(argv[i])
-            if _ASSIGNMENT.match(argv[i]):
-                i += 1                # `FOO=bar npm run x` runs npm
-                continue
-            if name in WRAPPERS:
-                i += 1
-                while i < len(argv) and argv[i].startswith("-"):
-                    i += 1            # skip wrapper flags such as `env -i`
-                continue
-            if name in SHELLS:
-                # Recurse into the -c payload rather than trusting the shell name.
-                for j in range(i + 1, len(argv)):
-                    if argv[j] in ("-c", "/c", "-Command"):
-                        if j + 1 < len(argv):
-                            found.extend(extract_commands(argv[j + 1], _depth=_depth + 1))
-                        break
-                else:
-                    found.append(name)
-                break
-            if name == "eval":
-                found.extend(extract_commands(" ".join(argv[i + 1:]), _depth=_depth + 1))
-                break
+        argv = _skip_prefix(argv)     # `FOO=bar sudo -u x npm run y` runs npm
+        if not argv:
+            continue
+        name = _basename(argv[0])
+        if name in SHELLS and (payload := _shell_payload(argv)) is not None:
+            found.extend(extract_commands(payload, _depth=_depth + 1))   # not the shell's name
+        elif name == "eval":
+            found.extend(extract_commands(" ".join(argv[1:]), _depth=_depth + 1))
+        else:
             found.append(name)
-            break
     return found or ["__empty__"]
 
 
@@ -382,8 +461,7 @@ def hard_block_reason(command: str) -> str | None:
             return f"blocked binary: {binary}"
         if binary == "__unparseable__":
             return "command could not be parsed safely"
-    label = _dangerous(command)
-    return f"dangerous construct: {label}" if label else None
+    return _dangerous(command)
 
 
 def operator_allow(command: str, cwd: str, now: datetime | None = None) -> dict | None:
@@ -449,10 +527,9 @@ _REMOTE_TEXT = re.compile(
 
 # Deletions that are ordinary local work unless they target root, home or a bare wildcard.
 DELETES = {"rm", "rmdir", "unlink"}
-_DELETE_ROOT = re.compile(
-    r"\b(?:rm|rmdir|unlink)\b\s+(?:-\S+\s+)*(?:/|~|\$HOME|\*)(?=[\s);`]|$|['\"])"
-    r"|\bfind\s+(?:/|~|\$HOME)(?=\s)",
-    re.IGNORECASE,
+# rm is judged per operand in _argv_danger; this catches find walking root or home to delete.
+_FIND_ROOT_DELETE = re.compile(
+    r"\bfind\s+(?:/|~|\$HOME)(?=\s)[^|;&]*(?:-delete\b|-exec\s+rm\b)", re.IGNORECASE,
 )
 
 
@@ -514,14 +591,10 @@ def triage(command: str) -> tuple[str, str]:
     for binary in binaries:
         if binary in HARD_BLOCK - DELETES:
             return "block", f"blocked binary: {binary}"
-    label = _dangerous(command, skip_find=True)
-    if label:
-        return "block", f"dangerous construct: {label}"
-    texts = executable_texts(command)
-    if any(_DELETE_ROOT.search(t) for t in texts) and (
-        DELETES.intersection(binaries) or "__unparseable__" in binaries
-        or any(re.search(r"\bfind\b.*(-delete|-exec\s+rm)\b", t) for t in texts)
-    ):
+    reason = _dangerous(command, skip_find=True)
+    if reason:
+        return "block", reason
+    if any(_FIND_ROOT_DELETE.search(t) for t in executable_texts(command)):
         return "block", "recursive delete of root, home or wildcard"
     if reaches_outside(command):
         return "external", "reaches past this machine"
