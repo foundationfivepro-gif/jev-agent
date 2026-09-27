@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "jev": {
+      "command": "bash",
+      "args": [
+        "${CLAUDE_PROJECT_DIR:-.}/scripts/cloud.sh",
+        "mcp"
+      ]
+    }
+  }
+}

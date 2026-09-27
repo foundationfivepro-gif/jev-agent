@@ -625,6 +625,20 @@ def test_hook_still_denies_in_bypass_mode(tmp_path):
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+@pytest.mark.parametrize("mode,expected", [("default", "ask"), ("bypassPermissions", None)])
+def test_hook_model_block_is_never_a_deny(mode, expected, monkeypatch):
+    """A model "block" (e.g. "touches credentials") is judgement; the user's permission choice decides."""
+    import hooks
+    import permission_gate
+    emitted = []
+    monkeypatch.setattr(hooks, "_have_key", lambda: True)
+    monkeypatch.setattr(hooks, "_emit", emitted.append)
+    monkeypatch.setattr(permission_gate, "gate", lambda c, cwd: {"final": "block", "reason": "touches credentials"})
+    hooks.gate_bash({"permission_mode": mode, "tool_input": {"command": "vercel env pull .env.local"}})
+    decisions = [e["hookSpecificOutput"]["permissionDecision"] for e in emitted]
+    assert decisions == ([expected] if expected else [])
+
+
 def test_long_paths_are_not_credential_shaped():
     from security_router import SECRET, classify
     cmd = ('cd /Users/administrator/Projects/active/wellness-by-madeline/crm-v2-quota-fix && '
@@ -721,6 +735,33 @@ def test_hooks_install_merges_and_is_idempotent(tmp_path):
     md = (tmp_path / ".claude" / "CLAUDE.md").read_text()
     assert md.startswith("# mine") and md.count("jev-agent:begin") == 1
     assert not (tmp_path / ".codex").exists()
+
+
+def test_project_hooks_mirror_install_and_stay_cloud_only(tmp_path):
+    """The committed cloud hooks cover the same events as `hooks.py install`, and are silent locally."""
+    import hooks
+
+    s = json.loads(open(os.path.join(ROOT, ".claude", "settings.json")).read())
+    wired = {(event, g.get("matcher"), h["command"].rsplit(" ", 1)[-1])
+             for event, groups in s["hooks"].items() for g in groups for h in g["hooks"]}
+    assert wired == {
+        ("SessionStart", None, "session"), ("UserPromptSubmit", None, "prompt"),
+        ("PreToolUse", "Bash", "gate-bash"), ("PreToolUse", "Agent|Task", "route-agent"),
+        ("PostToolUse", "Agent|Task", "agent-outcome"), ("PostToolUseFailure", "Agent|Task", "agent-outcome"),
+    }
+    assert {sub for *_, sub in wired} <= set(hooks.HANDLERS)
+    mcp = json.loads(open(os.path.join(ROOT, ".mcp.json")).read())
+    assert mcp["mcpServers"]["jev"]["args"][-1] == "mcp"
+
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_REMOTE"}
+    r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud.sh"), "hook", "gate-bash"],
+                       input='{"tool_input":{"command":"rm -rf /"}}', capture_output=True, text=True,
+                       env=env, timeout=30)
+    assert r.returncode == 0 and r.stdout == ""       # local: the user-scope install already gates
+    r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud.sh"), "hook", "gate-bash"],
+                       input='{"tool_input":{"command":"rm -rf /"}}', capture_output=True, text=True,
+                       env={**env, "CLAUDE_CODE_REMOTE": "true", "JEV_TRACE_DIR": str(tmp_path)}, timeout=30)
+    assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 # ------------------------------------------------------- response validation

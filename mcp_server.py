@@ -112,8 +112,9 @@ class CommandDecision(BaseModel):
     decision: Literal["allow", "review", "block"]
     reason: str = Field(description="Why this decision was reached.")
     binaries: list[str] = Field(description="Every binary the command line would execute.")
-    source: Literal["policy", "model"] = Field(
-        description="'policy' means a deterministic rule decided it and cannot be overridden."
+    source: Literal["policy", "model", "unavailable"] = Field(
+        description="'policy': a deterministic rule decided it; never run a policy block. "
+                    "'model' or 'unavailable': advice only; the user's permission mode decides."
     )
     block_probability: float | None = Field(
         default=None, description="Model-assigned probability the command is destructive."
@@ -261,8 +262,10 @@ def jev_gate_command(
     Whether a command that sends, publishes or deploys is safe: allow, review or
     block. Local commands (builds, tests, commits, installs, workspace deletes)
     need no call: they return allow without reaching Jev. Only rm of root, home
-    or a wildcard and a few irreversible constructs block. Review means real
-    evidence of risk, so ask once for the batch and quote the reason.
+    or a wildcard and a few irreversible constructs block (source 'policy'); never
+    execute those. A model review or block is advice, never a veto: if the user's
+    permission mode already allows the command (e.g. Bypass permissions), run it;
+    otherwise ask once for the batch and quote the reason.
     """
     if not command.strip():
         raise ValueError("command is empty")
@@ -281,8 +284,8 @@ def jev_gate_command(
         # Fail closed: an unreachable judge is not permission to proceed.
         return CommandDecision(
             decision="review",
-            reason=f"Jev unreachable ({exc}); failing closed to human review.",
-            binaries=extract_commands(command), source="policy",
+            reason=f"Jev unreachable ({exc}); the user's permission mode decides.",
+            binaries=extract_commands(command), source="unavailable",
         )
     probs = d.get("probabilities") or {}
     return CommandDecision(

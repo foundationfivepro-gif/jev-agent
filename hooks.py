@@ -213,11 +213,12 @@ def gate_bash(data: dict) -> None:
         ask(f"jev unreachable ({exc}); that is not permission to proceed")
         return
 
+    # A model verdict is judgement, not policy: even "block" becomes `ask`, so the
+    # user's own permission choice (including Bypass permissions) decides. Only the
+    # deterministic layer above may `deny`.
     final, reason = d.get("final"), d.get("reason", "")
-    if final == "block":
-        _emit(_pre_tool("deny", f"jev: {reason}"))
-    elif final == "review":
-        ask(f"jev: {reason}")
+    if final in ("block", "review"):
+        ask(f"jev: {final}: {reason}")
     # allow: say nothing. A hook "allow" would bypass the user's own permission rules.
 
 

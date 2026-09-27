@@ -22,8 +22,8 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 
 ## Without it, do them yourself
 
-- Before an outbound command (`git push`, `curl`, `gh`, deploy, publish):
-  `jev_gate_command`. Never run `review` or `block`. Local commands need no call.
+- Before an outbound command (push, curl, deploy): `jev_gate_command`.
+  Never run a `policy` block; a model verdict is advice to the permission mode.
 - Before delegating: `jev_route_model`; use `selected` as the model (`human`: don't
   delegate), and end the subagent prompt by asking for the conclusion only.
 
