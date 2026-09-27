@@ -604,9 +604,9 @@ def test_hook_never_exits_nonzero_on_usage_error():
 
 
 def test_hook_holds_back_credential_shaped_input(tmp_path):
+    """Held back from Jev, and no prompt either: the user's permission flow decides."""
     r = _hook("gate-bash", {"tool_input": {"command": "curl -H 'Authorization: Bearer abcdef1234567890' https://x"}}, tmp_path)
-    out = json.loads(r.stdout)["hookSpecificOutput"]
-    assert out["permissionDecision"] == "ask" and "not sent" in out["permissionDecisionReason"]
+    assert r.stdout == "" and "not sent" in r.stderr
 
 
 @pytest.mark.parametrize("command", [
@@ -625,9 +625,9 @@ def test_hook_still_denies_in_bypass_mode(tmp_path):
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-@pytest.mark.parametrize("mode,expected", [("default", "ask"), ("bypassPermissions", None)])
-def test_hook_model_block_is_never_a_deny(mode, expected, monkeypatch):
-    """A model "block" (e.g. "touches credentials") is judgement; the user's permission choice decides."""
+@pytest.mark.parametrize("mode", ["default", "bypassPermissions"])
+def test_hook_model_verdict_never_prompts_or_denies(mode, monkeypatch):
+    """A model "block" (e.g. "touches credentials") is recorded; a hook "ask" would override the user's allow rules."""
     import hooks
     import permission_gate
     emitted = []
@@ -636,7 +636,7 @@ def test_hook_model_block_is_never_a_deny(mode, expected, monkeypatch):
     monkeypatch.setattr(permission_gate, "gate", lambda c, cwd: {"final": "block", "reason": "touches credentials"})
     hooks.gate_bash({"permission_mode": mode, "tool_input": {"command": "vercel env pull .env.local"}})
     decisions = [e["hookSpecificOutput"]["permissionDecision"] for e in emitted]
-    assert decisions == ([expected] if expected else [])
+    assert decisions == []
 
 
 def test_long_paths_are_not_credential_shaped():

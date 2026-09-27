@@ -35,17 +35,16 @@ Three properties hold because this runs on every event:
 
   * It never exits non-zero. Exit 2 is Claude Code's blocking code, so a usage
     error or a crash here would block every prompt and every command.
-  * It answers inside HOOK_BUDGET_S. A hook that outlives Claude Code's timeout
-    is killed and the call proceeds ungated, so a slow Jev must resolve to an
-    explicit `ask` before that happens, not after.
-  * A `deny` cannot be overridden by the user, so it is reserved for the
-    irreversible: dangerous constructs and recursive deletion of root, home or
-    a wildcard. A local command never gets an `ask` from here; only one that
-    sends, publishes or deploys can.
+  * It answers inside HOOK_BUDGET_S. A slow Jev resolves to silence, and the
+    user's own permission flow decides.
+  * It never prompts. A hook `ask` overrides the user's allow rules and Bypass
+    permissions, so Jev's verdicts are recorded, not enforced. The only output
+    is a `deny`, reserved for the irreversible: dangerous constructs and
+    recursive deletion of root, home or a wildcard.
 
 What leaves the machine: the prompt text (first MAX_TASK_CHARS) and, for
-commands that reach outside, the command line go to Jev through the gateway. Anything credential-shaped is held back
-and turned into `ask` without being sent.
+commands that reach outside, the command line go to Jev through the gateway. Anything
+credential-shaped is held back and not sent.
 
     python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md
     python3 hooks.py install --dry-run
@@ -179,16 +178,14 @@ def gate_bash(data: dict) -> None:
     if not command.strip():
         return
 
-    def ask(reason: str) -> None:
-        # In Bypass permissions mode, stay silent instead of prompting; "deny" still applies.
-        if _bypassing(data):
-            print(f"{reason} (bypass mode: not prompting)", file=sys.stderr)
-            return
-        _emit(_pre_tool("ask", reason))
+    def note(reason: str) -> None:
+        # Jev never prompts. A hook "ask" overrides the user's own allow rules, so its
+        # opinion goes to stderr (and the trace) and Claude Code's permission flow decides.
+        print(reason, file=sys.stderr)
 
     # Local work (builds, tests, commits, installs, deletes inside the workspace)
-    # never reaches Jev and never gets an "ask" from us: Claude Code's own
-    # permission rules decide. Only the irreversible is denied here.
+    # never reaches Jev. Claude Code's own permission rules decide everything
+    # except the irreversible, which is denied here.
     kind, reason = triage(command)
     if kind == "block":
         _emit(_pre_tool("deny", f"jev: {reason}"))
@@ -197,7 +194,7 @@ def gate_bash(data: dict) -> None:
         return
 
     if _looks_secret(command):
-        ask("jev: command contains credential-shaped material; not sent to Jev")
+        note("jev: command contains credential-shaped material; not sent to Jev")
         return
 
     # Unconfigured is not an outage: leave the ordinary permission flow alone.
@@ -210,16 +207,15 @@ def gate_bash(data: dict) -> None:
     try:
         d = gate(command, str(data.get("cwd") or "."))
     except TransportError as exc:
-        ask(f"jev unreachable ({exc}); that is not permission to proceed")
+        note(f"jev unreachable ({exc})")
         return
 
-    # A model verdict is judgement, not policy: even "block" becomes `ask`, so the
-    # user's own permission choice (including Bypass permissions) decides. Only the
-    # deterministic layer above may `deny`.
+    # A model verdict is judgement, not policy: it is recorded, never enforced. Only
+    # the deterministic layer above may `deny`. Nor do we say "allow": that would
+    # bypass the user's own permission rules.
     final, reason = d.get("final"), d.get("reason", "")
     if final in ("block", "review"):
-        ask(f"jev: {final}: {reason}")
-    # allow: say nothing. A hook "allow" would bypass the user's own permission rules.
+        note(f"jev: {final}: {reason}")
 
 
 def _with_contract(tool_input: dict) -> dict | None:
@@ -275,8 +271,7 @@ def route_agent(data: dict) -> None:
 
     selected = d["selected"]
     if selected == "human":
-        if not _bypassing(data):
-            _emit(_pre_tool("ask", "jev_route_model: no model should attempt this unaided"))
+        contract_only("human route; not enforced")
         return
     if selected not in cat:
         contract_only("no route")
@@ -560,7 +555,7 @@ HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent
 FALLBACK = {
     "agent-outcome": None,
     "session": None,
-    "gate-bash": _pre_tool("ask", f"jev: no answer within {HOOK_BUDGET_S}s; that is not permission to proceed"),
+    "gate-bash": None,
     "route-agent": None,
     "prompt": None,
 }
