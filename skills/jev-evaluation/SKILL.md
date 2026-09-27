@@ -92,7 +92,8 @@ call, and pick it from what being wrong costs:
 
 | the decision | no answer means | tool behaviour |
 |---|---|---|
-| irreversible or outbound action | human review | `jev_check_action`, `jev_gate_command` fail closed |
+| irreversible action | human review | `jev_check_action` fails closed |
+| outbound command | the user's permission mode | `jev_gate_command` returns `review`; hook notes it |
 | scheduled run | proceed | `jev_should_run` fails open |
 | model route | unset; session default | `jev_route_model` error names it |
 | which files to read | Grep/Glob, read the matches | `jev_select_context` error names it |
