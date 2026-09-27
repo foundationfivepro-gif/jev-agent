@@ -53,7 +53,9 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "powershell
 DANGEROUS_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bfind\b[^|;]*-delete\b", "find -delete"),
     (r"\bfind\b[^|;]*-exec\b[^;]*\brm\b", "find -exec rm"),
-    (r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba)?sh\b", "pipe download to shell"),
+    (r"\b(curl|wget)\b[^|]*\|\s*"
+     r"(?:(?:sudo|doas|env|command|exec|nice|nohup|time)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+)*"
+     r"(?:\S*/)?(?:ba|z|da|k)?sh\b", "pipe download to shell"),
     (r">\s*/dev/(sd[a-z]|nvme\d|disk\d)", "write to raw device"),
     (r":\(\)\s*\{.*\|.*&.*\}\s*;", "fork bomb"),
     (r"\bgit\b[^|;]*\bpush\b[^|;]*(--force(?!-with-lease)|-f)\b", "force push"),
@@ -74,8 +76,35 @@ EXTERNAL = {
 
 SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
 
+# Nesting deeper than this (sh -c inside $(...) inside eval ...) is denied rather
+# than left unchecked. No ordinary command comes close.
+MAX_DEPTH = 8
+TOO_DEEP = "__too_deep__"
+
 # `NAME=value` before a command sets its environment; it is not the command.
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _strip_comments(command: str) -> str:
+    """Drop `# ...` to end of line where # starts a word outside quotes; the shell never runs it."""
+    out, quote, i, n = [], None, 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\" and quote != "'" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or command[i - 1] in " \t\n;&|("):
+            j = command.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def _lift_substitutions(command: str) -> tuple[str, list[str]]:
@@ -104,9 +133,18 @@ def _lift_substitutions(command: str) -> tuple[str, list[str]]:
         elif c == '"':
             quote = None if quote == '"' else '"'
         if c == "$" and command[i + 1:i + 2] == "(" and command[i + 2:i + 3] != "(":
-            depth, j = 1, i + 2
+            depth, j, inner = 1, i + 2, None
             while j < n and depth:
-                depth += {"(": 1, ")": -1}.get(command[j], 0)
+                ch = command[j]
+                if ch == "\\" and inner != "'":
+                    j += 2
+                    continue
+                if inner:
+                    inner = None if ch == inner else inner
+                elif ch in "'\"":
+                    inner = ch
+                else:
+                    depth += {"(": 1, ")": -1}.get(ch, 0)
                 j += 1
             found.append(command[i + 2:j - 1] if not depth else command[i + 2:])
             out.append("_")
@@ -154,8 +192,7 @@ def _strip_heredocs(command: str) -> tuple[str, list[str]]:
     for m in _HEREDOC.finditer(command):
         line_start = command.rfind("\n", 0, m.start()) + 1
         head = re.split(r"[;&|(]", command[line_start:m.start()])[-1].split()
-        while head and _basename(head[0]) in WRAPPERS:
-            head = head[1:]
+        head = _skip_prefix(head)
         if head and _basename(head[0]) in SHELLS:
             executed.append(m.group(3))
         out.append(command[pos:m.start(3)])
@@ -233,12 +270,14 @@ def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
     Payloads that do execute (`sh -c '...'`, `eval`, `$(...)` inside double
     quotes, a heredoc fed to a shell) are scanned on their own.
     """
-    if _depth > 3:
+    if _depth > MAX_DEPTH:
         return [command]
     text, bodies = _strip_heredocs(command)
+    text = _strip_comments(text)
     masked, payloads = _mask_quotes(text)
     payloads += bodies + _lift_substitutions(text)[1]
     for segment in _segments(text):
+        segment = segment.lstrip("({ \t").rstrip(")} \t")
         try:
             argv = shlex.split(segment)
         except ValueError:
@@ -287,12 +326,12 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
     Returns lowercased basenames. Bounded recursion — a line nested deeper than
     three shells is treated as unparseable by the caller.
     """
-    if _depth > 3:
-        return ["__unparseable__"]
+    if _depth > MAX_DEPTH:
+        return [TOO_DEEP]
 
     found: list[str] = []
     text, bodies = _strip_heredocs(command)
-    text, substitutions = _lift_substitutions(text)
+    text, substitutions = _lift_substitutions(_strip_comments(text))
     for body in bodies + substitutions:
         found.extend(extract_commands(body, _depth=_depth + 1))
     for segment in _segments(text):
@@ -411,7 +450,7 @@ _REMOTE_TEXT = re.compile(
 # Deletions that are ordinary local work unless they target root, home or a bare wildcard.
 DELETES = {"rm", "rmdir", "unlink"}
 _DELETE_ROOT = re.compile(
-    r"\b(?:rm|rmdir|unlink)\b\s+(?:-\S+\s+)*(?:/|~|\$HOME|\*)(?=[\s);}`]|$|['\"])"
+    r"\b(?:rm|rmdir|unlink)\b\s+(?:-\S+\s+)*(?:/|~|\$HOME|\*)(?=[\s);`]|$|['\"])"
     r"|\bfind\s+(?:/|~|\$HOME)(?=\s)",
     re.IGNORECASE,
 )
@@ -435,7 +474,7 @@ def _subcommand(argv: list[str]) -> str:
 def reaches_outside(command: str) -> bool:
     """True when the command sends, publishes or deploys. Unparseable lines are read as text."""
     try:
-        for segment in _segments(_strip_heredocs(command)[0]):
+        for segment in _segments(_strip_comments(_strip_heredocs(command)[0])):
             argv = shlex.split(segment)
             while argv and _ASSIGNMENT.match(argv[0]):
                 argv = argv[1:]
@@ -470,6 +509,8 @@ def triage(command: str) -> tuple[str, str]:
     in a heredoc), is local work, not a reason to stop someone.
     """
     binaries = extract_commands(command)
+    if TOO_DEEP in binaries:
+        return "block", "nested too deeply to check"
     for binary in binaries:
         if binary in HARD_BLOCK - DELETES:
             return "block", f"blocked binary: {binary}"
