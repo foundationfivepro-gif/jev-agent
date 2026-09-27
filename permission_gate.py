@@ -74,6 +74,142 @@ EXTERNAL = {
 
 SEPARATORS = re.compile(r"\s*(?:\|\||&&|[;&|])\s*")
 
+# A heredoc: `<<EOF`, `<<-'EOF'`, `<<"EOF"`. Group 3 is the body, up to the terminator line.
+_HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1[^\n]*\n(.*?)^[ \t]*\2[ \t]*$", re.S | re.M)
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+
+def _strip_heredocs(command: str) -> tuple[str, list[str]]:
+    """
+    The command without heredoc bodies, plus the bodies a shell will execute.
+
+    A heredoc body is data (a PR description, a script for python3) unless the
+    command it feeds is itself a shell: `bash <<EOF` runs every line of it.
+    """
+    executed: list[str] = []
+    out, pos = [], 0
+    for m in _HEREDOC.finditer(command):
+        line_start = command.rfind("\n", 0, m.start()) + 1
+        head = re.split(r"[;&|(]", command[line_start:m.start()])[-1].split()
+        while head and _basename(head[0]) in WRAPPERS:
+            head = head[1:]
+        if head and _basename(head[0]) in SHELLS:
+            executed.append(m.group(3))
+        out.append(command[pos:m.start(3)])
+        pos = m.end()
+    out.append(command[pos:])
+    return "".join(out), executed
+
+
+def _segments(command: str) -> list[str]:
+    """Split on ; & | && || and newlines, but never inside quotes. `2>&1` is not a separator."""
+    segments, cur, quote, i = [], [], None, 0
+    while i < len(command):
+        c = command[i]
+        if c == "\\" and quote != "'" and i + 1 < len(command):
+            cur.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = None if c == quote else quote
+            cur.append(c)
+        elif c in "'\"":
+            quote = c
+            cur.append(c)
+        elif c in ";|\n" or (c == "&" and command[i - 1:i] not in (">", "<") and command[i + 1:i + 2] != ">"):
+            segments.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    segments.append("".join(cur))
+    return [seg.strip() for seg in segments if seg.strip()]
+
+
+def _mask_quotes(command: str) -> tuple[str, list[str]]:
+    """
+    The command with quoted prose removed, plus command substitutions found inside it.
+
+    A quoted string with whitespace in it is an argument (a commit message, a
+    grep pattern), not something the shell runs, so it becomes `_`. A quoted
+    single word ("sh", "--force") keeps its text: it may still be a command or
+    a flag. `$(...)` and backticks inside double quotes do run, so they are
+    returned for scanning in their own right.
+    """
+    out, subs, quote, start, i = [], [], None, 0, 0
+    while i < len(command):
+        c = command[i]
+        if c == "\\" and quote != "'" and i + 1 < len(command):
+            if not quote:
+                out.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                body = command[start:i]
+                if quote == '"':
+                    subs.extend(a or b for a, b in _SUBSTITUTION.findall(body))
+                out.append(body if body and not re.search(r"[\s;&|<>]", body) else "_")
+                quote = None
+        elif c in "'\"":
+            quote, start = c, i + 1
+        else:
+            out.append(c)
+        i += 1
+    if quote:                                   # unterminated: treat the rest as code
+        out.append(command[start - 1:])
+    return "".join(out), subs
+
+
+def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
+    """
+    Every piece of this command line the shell will actually run, quoted prose removed.
+
+    Pattern checks run on these, so a commit message or PR body that *mentions*
+    a download piped to a shell, or a force push, is not mistaken for one.
+    Payloads that do execute (`sh -c '...'`, `eval`, `$(...)` inside double
+    quotes, a heredoc fed to a shell) are scanned on their own.
+    """
+    if _depth > 3:
+        return [command]
+    text, bodies = _strip_heredocs(command)
+    masked, payloads = _mask_quotes(text)
+    payloads += bodies
+    for segment in _segments(text):
+        try:
+            argv = shlex.split(segment)
+        except ValueError:
+            continue
+        while argv and _basename(argv[0]) in WRAPPERS:
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[1:]
+        if not argv:
+            continue
+        name = _basename(argv[0])
+        if name == "eval":
+            payloads.append(" ".join(argv[1:]))
+        elif name in SHELLS:
+            for j, arg in enumerate(argv[:-1]):
+                if arg in ("-c", "/c", "-Command"):
+                    payloads.append(argv[j + 1])
+                    break
+    texts = [masked]
+    for payload in payloads:
+        texts.extend(executable_texts(payload, _depth=_depth + 1))
+    return texts
+
+
+def _dangerous(command: str, *, skip_find: bool = False) -> str | None:
+    """The label of the first dangerous construct that would actually execute, if any."""
+    for text in executable_texts(command):
+        for pattern, label in DANGEROUS_PATTERNS:
+            if skip_find and label.startswith("find "):
+                continue
+            if re.search(pattern, text, re.IGNORECASE):
+                return label
+    return None
+
 
 def _basename(token: str) -> str:
     """Strip any path and extension so /usr/bin/rm and C:\\bin\\rm.exe both read as 'rm'."""
@@ -95,10 +231,10 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
         return ["__unparseable__"]
 
     found: list[str] = []
-    for segment in SEPARATORS.split(command):
-        segment = segment.strip()
-        if not segment:
-            continue
+    text, bodies = _strip_heredocs(command)
+    for body in bodies:
+        found.extend(extract_commands(body, _depth=_depth + 1))
+    for segment in _segments(text):
         try:
             argv = shlex.split(segment)
         except ValueError:
@@ -125,6 +261,9 @@ def extract_commands(command: str, *, _depth: int = 0) -> list[str]:
                 else:
                     found.append(name)
                 break
+            if name == "eval":
+                found.extend(extract_commands(" ".join(argv[i + 1:]), _depth=_depth + 1))
+                break
             found.append(name)
             break
     return found or ["__empty__"]
@@ -137,10 +276,8 @@ def hard_block_reason(command: str) -> str | None:
             return f"blocked binary: {binary}"
         if binary == "__unparseable__":
             return "command could not be parsed safely"
-    for pattern, label in DANGEROUS_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return f"dangerous construct: {label}"
-    return None
+    label = _dangerous(command)
+    return f"dangerous construct: {label}" if label else None
 
 
 def operator_allow(command: str, cwd: str, now: datetime | None = None) -> dict | None:
@@ -231,7 +368,7 @@ def _subcommand(argv: list[str]) -> str:
 def reaches_outside(command: str) -> bool:
     """True when the command sends, publishes or deploys. Unparseable lines are read as text."""
     try:
-        for segment in SEPARATORS.split(command):
+        for segment in _segments(_strip_heredocs(command)[0]):
             argv = shlex.split(segment)
             while argv and _basename(argv[0]) in WRAPPERS:
                 # `sudo -u x scp`: flag values are indistinguishable from the command,
@@ -267,11 +404,13 @@ def triage(command: str) -> tuple[str, str]:
     for binary in binaries:
         if binary in HARD_BLOCK - DELETES:
             return "block", f"blocked binary: {binary}"
-    for pattern, label in DANGEROUS_PATTERNS:
-        if not label.startswith("find ") and re.search(pattern, command, re.IGNORECASE):
-            return "block", f"dangerous construct: {label}"
-    if _DELETE_ROOT.search(command) and (
-        DELETES.intersection(binaries) or "__unparseable__" in binaries or re.search(r"\bfind\b.*(-delete|-exec\s+rm)\b", command)
+    label = _dangerous(command, skip_find=True)
+    if label:
+        return "block", f"dangerous construct: {label}"
+    texts = executable_texts(command)
+    if any(_DELETE_ROOT.search(t) for t in texts) and (
+        DELETES.intersection(binaries) or "__unparseable__" in binaries
+        or any(re.search(r"\bfind\b.*(-delete|-exec\s+rm)\b", t) for t in texts)
     ):
         return "block", "recursive delete of root, home or wildcard"
     if reaches_outside(command):
