@@ -91,6 +91,9 @@ _WRAPPER_VALUE_OPTS = {
     "xargs": {"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "--max-args", "--max-procs",
               "--delimiter", "--arg-file", "--replace"},
 }
+# Reserved words that can precede a simple command; the command follows them.
+_KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "(", "time"}
+
 # Wrappers whose first positional argument is not the command: `timeout 5 cmd`.
 _WRAPPER_POSITIONALS = {"timeout": 1}
 
@@ -120,7 +123,7 @@ def _strip_comments(command: str) -> str:
     return "".join(out)
 
 
-def _lift_substitutions(command: str) -> tuple[str, list[str]]:
+def _lift_substitutions(command: str, *, quotes: bool = True) -> tuple[str, list[str]]:
     """
     The command with each `$(...)` and backtick span replaced by `_`, plus their contents.
 
@@ -136,12 +139,16 @@ def _lift_substitutions(command: str) -> tuple[str, list[str]]:
             out.append(command[i:i + 2])
             i += 2
             continue
-        if quote == "'":
+        if not quotes:                          # heredoc body: ' and " are ordinary text
+            pass
+        elif quote == "'":
             quote = None if c == "'" else quote
             out.append(c)
             i += 1
             continue
-        if c == "'" and quote is None:
+        if not quotes:
+            pass
+        elif c == "'" and quote is None:
             quote = "'"
         elif c == '"':
             quote = None if quote == '"' else '"'
@@ -178,7 +185,7 @@ def _lift_substitutions(command: str) -> tuple[str, list[str]]:
 def _skip_prefix(argv: list[str]) -> list[str]:
     """Drop leading environment assignments and wrappers (with their options): what runs is after them."""
     while argv:
-        if _ASSIGNMENT.match(argv[0]):
+        if _ASSIGNMENT.match(argv[0]) or argv[0] in _KEYWORDS:
             argv = argv[1:]
             continue
         wrapper = _basename(argv[0])
@@ -207,50 +214,76 @@ def _shell_payload(argv: list[str]) -> str | None:
 
 
 # A heredoc: `<<EOF`, `<<-'EOF'`, `<<"EOF"`. Group 3 is the body, up to the terminator line.
-_HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_]\w*)\2[^\n]*\n(.*?)^(?(1)\t*)\3$", re.S | re.M)
+# A heredoc operator and its delimiter word: 'quoted', "quoted", \\escaped or bare.
+_HEREDOC_OP = re.compile(r"""(?<!<)<<(-)?(?!<)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([^\s;&|<>()'"\\]+))""")
 
 
 def _strip_heredocs(command: str) -> tuple[str, list[str]]:
     """
     The command without heredoc bodies, plus the parts of those bodies that execute.
 
-    A heredoc body is data (a PR description, a script for python3) unless the
-    command it feeds is itself a shell: `bash <<EOF` runs every line of it. An
-    unquoted delimiter (`<<EOF`) still expands `$(...)` in the body, whatever
-    reads it. A `<<` inside a comment starts nothing.
+    A heredoc body is data (a PR description, a script for python3) unless a
+    shell reads it as its script: `bash <<EOF` runs every line, while
+    `bash -c 'cat' <<EOF` and `bash script.sh <<EOF` only read it. An unquoted
+    delimiter still expands `$(...)` in the body, whatever reads it. A `<<`
+    inside a comment starts nothing. The terminator must match exactly; only
+    `<<-` lets it be indented, and only with tabs.
     """
     executed: list[str] = []
     out, pos, search = [], 0, 0
-    while (m := _HEREDOC.search(command, search)):
+    while (m := _HEREDOC_OP.search(command, search)):
         line_start = command.rfind("\n", 0, m.start()) + 1
         prefix = command[line_start:m.start()]
-        if not _strip_comments(prefix + "<<").endswith("<<"):
-            search = m.start() + 2
+        body_start = command.find("\n", m.end())
+        if body_start < 0 or not _strip_comments(prefix + "<<").endswith("<<"):
+            search = m.end()
             continue
+        body_start += 1
+        delim = m.group(2) or m.group(3) or m.group(4)
+        quoted = bool(m.group(2) or m.group(3) or m.group(0).rstrip().endswith("\\" + delim))
+        end, cursor = len(command), body_start
+        while cursor < len(command):
+            nl = command.find("\n", cursor)
+            line = command[cursor:len(command) if nl < 0 else nl]
+            if (line.lstrip("\t") if m.group(1) else line) == delim:
+                end = cursor
+                break
+            cursor = len(command) if nl < 0 else nl + 1
+        body = command[body_start:end]
+        after = command.find("\n", end)
+        after = len(command) if after < 0 else after
+
         segments = _segments(prefix) or [""]
-        head_text = segments[-1].lstrip("({ \t")
+        head_text = segments[-1]
         try:
             head = shlex.split(head_text)
         except ValueError:
             head = head_text.split()
         head = _skip_prefix(head)
-        body = m.group(4)
-        if head and _basename(head[0]) in SHELLS:
+        reads_script = (head and _basename(head[0]) in SHELLS and _shell_payload(head) is None
+                        and not any(not a.startswith("-") for a in head[1:]))
+        if reads_script:
             executed.append(body)
-        elif not m.group(2):
-            executed.extend(_lift_substitutions(body)[1])
-        out.append(command[pos:m.start(4)])
-        pos = search = m.end()
+        elif not quoted:
+            executed.extend(_lift_substitutions(body, quotes=False)[1])
+        out.append(command[pos:body_start])
+        pos = search = after
     out.append(command[pos:])
     return "".join(out), executed
 
 
-def _segments(command: str) -> list[str]:
-    """Split on ; & | && || and newlines, but never inside quotes. `2>&1` is not a separator."""
-    segments, cur, quote, i = [], [], None, 0
-    while i < len(command):
+def _segments(command: str, *, pipes: bool = False):
+    """
+    Split on ; & | && || and newlines, but never inside quotes. `2>&1` is not a separator.
+
+    With pipes=True, returns (segment, piped) pairs, piped meaning the segment
+    reads the previous one's output (`|` or `|&`, not `||`).
+    """
+    segments, cur, quote, i, piped = [], [], None, 0, False
+    n = len(command)
+    while i < n:
         c = command[i]
-        if c == "\\" and quote != "'" and i + 1 < len(command):
+        if c == "\\" and quote != "'" and i + 1 < n:
             cur.append(command[i:i + 2])
             i += 2
             continue
@@ -261,13 +294,23 @@ def _segments(command: str) -> list[str]:
             quote = c
             cur.append(c)
         elif c in ";|\n" or (c == "&" and command[i - 1:i] not in (">", "<") and command[i + 1:i + 2] != ">"):
-            segments.append("".join(cur))
+            segments.append(("".join(cur), piped))
             cur = []
+            nxt = command[i + 1:i + 2]
+            if c == "|" and nxt == "|" or c == "&" and nxt == "&":
+                piped, i = False, i + 1
+            elif c == "|":
+                piped = True
+                if nxt == "&":
+                    i += 1
+            else:
+                piped = False
         else:
             cur.append(c)
         i += 1
-    segments.append("".join(cur))
-    return [seg.strip() for seg in segments if seg.strip()]
+    segments.append(("".join(cur), piped))
+    pairs = [(seg.strip(), was_piped) for seg, was_piped in segments if seg.strip()]
+    return pairs if pipes else [seg for seg, _ in pairs]
 
 
 def _mask_quotes(command: str) -> str:
@@ -330,9 +373,14 @@ def executable_texts(command: str, *, _depth: int = 0) -> list[str]:
 
 
 def _argvs(text: str) -> list[list[str]]:
-    """The argv of each simple command in `text`, past assignments and wrappers."""
-    found = []
-    for segment in _segments(_lift_substitutions(text)[0]):
+    """The argv of each simple command in `text`, past keywords, assignments and wrappers."""
+    return [argv for pipeline in _pipelines(text) for argv in pipeline]
+
+
+def _pipelines(text: str) -> list[list[list[str]]]:
+    """Commands grouped by pipeline, each as argv; `find -exec rm ... ;` adds the rm."""
+    pipelines: list[list[list[str]]] = []
+    for segment, piped in _segments(_lift_substitutions(text)[0], pipes=True):
         segment = segment.lstrip("({ \t").rstrip(") \t")    # `(rm x)`, `{ rm x; }`
         try:
             pieces = [shlex.split(segment)]
@@ -345,11 +393,41 @@ def _argvs(text: str) -> list[list[str]]:
                     pieces.append(shlex.split(piece))
                 except ValueError:
                     pieces.append(piece.split())
+        stage: list[list[str]] = []
         for argv in pieces:
             argv = _skip_prefix(argv)
-            if argv:
-                found.append(argv)
-    return found
+            if not argv:
+                continue
+            stage.append(argv)
+            if _basename(argv[0]) == "find":
+                for j, a in enumerate(argv):
+                    if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                        rest = argv[j + 1:]
+                        stop = next((k for k, b in enumerate(rest) if b in (";", "+")), len(rest))
+                        inner = _skip_prefix(rest[:stop])
+                        if inner:
+                            stage.append(inner)
+        if not stage:
+            continue
+        if piped and pipelines:
+            pipelines[-1].extend(stage)
+        else:
+            pipelines.append(stage)
+    return pipelines
+
+
+def _pipe_to_shell(text: str) -> bool:
+    """A download feeding a shell that reads its script from stdin: `curl x | sudo -u root sh`."""
+    for pipeline in _pipelines(text):
+        downloaded = False
+        for argv in pipeline:
+            name = _basename(argv[0])
+            if name in ("curl", "wget"):
+                downloaded = True
+            elif downloaded and name in SHELLS and _shell_payload(argv) is None and not any(
+                    not a.startswith("-") for a in argv[1:]):
+                return True
+    return False
 
 
 # Delete targets that mean root, home or everything here.
@@ -369,22 +447,26 @@ def _root_target(operand: str) -> bool:
 def _argv_danger(argv: list[str]) -> str | None:
     """Irreversible by what the command's own arguments say."""
     name, args = _basename(argv[0]), argv[1:]
-    if name == "rm" and any(a in ("-r", "-R", "--recursive") or (
-            a.startswith("-") and not a.startswith("--") and set(a[1:]) & {"r", "R"}) for a in args):
-        operands, flags_done = [], False
+    if name == "rm":
+        flags, operands, flags_done = [], [], False
         for a in args:
             if flags_done or not a.startswith("-") or a == "-":
                 operands.append(a)
             elif a == "--":
                 flags_done = True
-        if any(_root_target(a) for a in operands):
+            else:
+                flags.append(a)
+        recursive = any(f in ("-r", "-R", "--recursive") or (
+            not f.startswith("--") and set(f[1:]) & {"r", "R"}) for f in flags)
+        if recursive and any(_root_target(a) for a in operands):
             return "recursive delete of root, home or wildcard"
     if name == "git" and _subcommand(argv) == "push":
         for a in args:
             if a in ("--force", "-f") or a.startswith("+") or (
                     a.startswith("-") and not a.startswith("--") and "f" in a[1:]):
                 return "dangerous construct: force push"
-    if name == "chmod" and any(re.fullmatch(r"0?777", a) for a in args):
+    mode = next((a for a in args if not a.startswith("-")), "")
+    if name == "chmod" and re.fullmatch(r"0?777", mode):
         return "dangerous construct: chmod 777"
     if name == "history" and any(a.startswith("-") and "c" in a for a in args):
         return "dangerous construct: clear shell history"
@@ -402,6 +484,8 @@ def _dangerous(command: str, *, skip_find: bool = False) -> str | None:
         for argv in _argvs(text):
             if (reason := _argv_danger(argv)):
                 return reason
+        if _pipe_to_shell(text):
+            return "dangerous construct: pipe download to shell"
     return None
 
 
@@ -549,29 +633,13 @@ def _subcommand(argv: list[str]) -> str:
 
 
 def reaches_outside(command: str) -> bool:
-    """True when the command sends, publishes or deploys. Unparseable lines are read as text."""
-    try:
-        for segment in _segments(_strip_comments(_strip_heredocs(command)[0])):
-            argv = shlex.split(segment)
-            while argv and _ASSIGNMENT.match(argv[0]):
-                argv = argv[1:]
-            while argv and _basename(argv[0]) in WRAPPERS:
-                # `sudo -u x scp`: flag values are indistinguishable from the command,
-                # so resume at the first token that names a tool we care about.
-                rest = argv[1:]
-                known = [i for i, a in enumerate(rest)
-                         if _basename(a) in REMOTE or _basename(a) in REMOTE_SUBCOMMANDS]
-                argv = rest[known[0]:] if known else [a for a in rest if not a.startswith("-")]
-            if not argv:
-                continue
+    """True when anything this command would run sends, publishes or deploys."""
+    for text in executable_texts(command):
+        for argv in _argvs(text):
             name = _basename(argv[0])
-            if name in SHELLS:
-                return bool(_REMOTE_TEXT.search(segment))
             if name in REMOTE or _subcommand(argv) in REMOTE_SUBCOMMANDS.get(name, ()):
                 return True
-        return False
-    except ValueError:
-        return bool(_REMOTE_TEXT.search(command))
+    return False
 
 
 def triage(command: str) -> tuple[str, str]:
