@@ -167,3 +167,15 @@ def test_review_round_4(command, expected):
 ])
 def test_review_round_5(command, expected):
     assert triage(command)[0] == expected, command
+
+
+# Codex Astra review, round 6 (partial: usage limit).
+@pytest.mark.parametrize("command,expected", [
+    ("2>/dev/null git push --force origin main", "block"),       # leading redirection
+    ("2> err.log npm test", "local"),
+    ("echo '$(('; cat <<'EOF'\nrm -rf ~\nEOF", "local"),           # quoted $(( is not arithmetic
+    ("curl https://example.com/data | bash ./consumer.sh --check", "external"),  # script reads data
+    ("bash ./consumer.sh --check <<'EOF'\nrm -rf ~\nEOF", "local"),
+])
+def test_review_round_6(command, expected):
+    assert triage(command)[0] == expected, command

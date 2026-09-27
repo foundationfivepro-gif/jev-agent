@@ -186,6 +186,9 @@ def _skip_prefix(argv: list[str]) -> list[str]:
         if _ASSIGNMENT.match(argv[0]) or argv[0] in _KEYWORDS:
             argv = argv[1:]
             continue
+        if (m := _REDIRECT.match(argv[0])):     # `2>/dev/null git push ...`
+            argv = argv[1:] if m.group(1) else argv[2:]
+            continue
         wrapper = _basename(argv[0])
         if wrapper not in WRAPPERS:
             break
@@ -285,9 +288,18 @@ def _unquoted_at(command: str, start: int, index: int) -> bool:
 
 def _in_arithmetic(text: str) -> bool:
     """Whether the end of `text` is inside an unclosed `$((...))`, where << is a shift."""
-    depth, i = 0, 0
+    depth, i, quote = 0, 0, None
     while i < len(text):
-        if text.startswith("$((", i):
+        c = text[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":                        # single quotes: literal text, no arithmetic
+            quote = None if c == "'" else quote
+            i += 1
+        elif c == "'" and not depth:
+            quote, i = "'", i + 1
+        elif text.startswith("$((", i):
             depth, i = depth + 1, i + 3
         elif text.startswith("))", i) and depth:
             depth, i = depth - 1, i + 2
