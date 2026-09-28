@@ -7,8 +7,9 @@ makes the root importable, because Vercel executes functions from api/.
 Environment variables to set in the Vercel project (Settings -> Environment
 Variables), not in this file:
 
-    TYPESAFE_API_KEY     the TypeSafe key the tools spend (api.typesafe.ai); the
-                         legacy AI_GATEWAY_API_KEY still works if it is the only one
+    OPENROUTER_API_KEY   the OpenRouter key the tools spend (openrouter.ai System
+                         One API); TYPESAFE_API_KEY and the legacy AI_GATEWAY_API_KEY
+                         still work if no OpenRouter key is set
     JEV_REMOTE_TOKEN     the shared secret clients must present; without it the
                          server refuses every request rather than serving an
                          open endpoint that spends your quota

@@ -32,10 +32,11 @@ decision that repeats most often, measure it, then replace the next one.
 
 ## 2. Ask it
 
-TypeSafe (one key, `TYPESAFE_API_KEY`):
+OpenRouter (one key, `OPENROUTER_API_KEY`; TypeSafe's own API at `api.typesafe.ai/v1/systemone`
+takes the same body with `TYPESAFE_API_KEY`):
 
 ```
-POST https://api.typesafe.ai/v1/systemone         model: jev-latest
+POST https://openrouter.ai/api/v1/systemone       model: jev-latest
 ```
 
 The direct API is `typesafe-sdk` with model `jev-latest`, and OpenRouter uses

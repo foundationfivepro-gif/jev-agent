@@ -1,4 +1,4 @@
-"""Transport: TypeSafe's API is preferred; the Vercel gateway is the legacy fallback."""
+"""Transport: OpenRouter first, then TypeSafe's API, then the legacy Vercel gateway."""
 
 from __future__ import annotations
 
@@ -13,6 +13,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core
 from core import Choice, Noul, Score, TransportError, active_transport, decide
+
+
+@pytest.fixture(autouse=True)
+def _no_openrouter_key(monkeypatch):
+    """A real .env may have filled OPENROUTER_API_KEY; tests below opt in to it explicitly."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
 
 class _Resp(io.BytesIO):
@@ -58,10 +64,12 @@ TYPESAFE_REPLY = {  # shapes copied from docs.typesafe.ai/api
     ({"TYPESAFE_API_KEY": "t"}, "typesafe"),
     ({"AI_GATEWAY_API_KEY": "g"}, "gateway"),
     ({"TYPESAFE_API_KEY": "t", "AI_GATEWAY_API_KEY": "g"}, "typesafe"),
+    ({"OPENROUTER_API_KEY": "o", "TYPESAFE_API_KEY": "t", "AI_GATEWAY_API_KEY": "g"}, "openrouter"),
+    ({"OPENROUTER_API_KEY": "o", "AI_GATEWAY_API_KEY": "g"}, "openrouter"),
     ({}, ""),
 ])
-def test_typesafe_key_wins(monkeypatch, keys, expected):
-    for var in ("TYPESAFE_API_KEY", "AI_GATEWAY_API_KEY"):
+def test_key_order_openrouter_then_typesafe_then_gateway(monkeypatch, keys, expected):
+    for var in ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "AI_GATEWAY_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     for var, val in keys.items():
         monkeypatch.setenv(var, val)
@@ -123,5 +131,49 @@ def test_http_errors_name_the_transport(monkeypatch):
 def test_no_key_says_which_key_to_add(monkeypatch):
     for var in ("TYPESAFE_API_KEY", "AI_GATEWAY_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    with pytest.raises(TransportError, match="TYPESAFE_API_KEY"):
+    with pytest.raises(TransportError, match="OPENROUTER_API_KEY"):
         decide("x", {"urgent": QUESTIONS["urgent"]})
+
+
+def test_openrouter_speaks_typesafe_dialect_at_its_documented_url(monkeypatch):
+    """openrouter.ai/docs/guides/community/typesafe-sdk: same body, /api/v1/systemone."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")            # present but never used
+    reply = {**TYPESAFE_REPLY, "id": "gen-dec-1", "provider": "TypeSafe",
+             "model": "typesafe/jev-1.13-20260917",
+             "usage": {**TYPESAFE_REPLY["usage"], "cost": 0.00003}}
+    seen = _capture(monkeypatch, reply)
+
+    d = decide({"ticket": "payouts failing"}, QUESTIONS)
+
+    [(url, headers, body)] = seen
+    assert url == "https://openrouter.ai/api/v1/systemone"
+    assert headers["Authorization"] == "Bearer sk-or-test"
+    assert body["model"] == "jev-latest" and body["questions"]["urgent"]["type"] == "noul"
+    assert d.transport == "openrouter" and d.model == "typesafe/jev-1.13-20260917"
+    assert d["urgent"] == 0.95 and d["team"] == "billing" and (d.input_tokens, d.output_tokens) == (318, 34)
+
+
+def test_openrouter_criteria_only_noul_gets_neutral_instructions(monkeypatch):
+    """OpenRouter 400s a noul without instructions; TypeSafe and the gateway never needed them."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    seen = _capture(monkeypatch, {"answers": {"ok": {"type": "noul", "noul": 0.3}}, "usage": {}})
+    decide("x", {"ok": Noul(criteria={"true": "yes case", "false": "no case"})})
+    sent = seen[0][2]["questions"]["ok"]
+    assert sent["instructions"] == core.NOUL_BY_CRITERIA and sent["criteria"]["true"] == "yes case"
+
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    seen = _capture(monkeypatch, {"answers": {"ok": {"type": "noul", "noul": 0.3}}, "usage": {}})
+    decide("x", {"ok": Noul(criteria={"true": "yes case", "false": "no case"})})
+    assert "instructions" not in seen[0][2]["questions"]["ok"]
+
+
+def test_load_env_never_replaces_a_variable_already_set(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("OPENROUTER_API_KEY='from-file'\nJEV_TEST_ONLY=x\n# comment\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
+    monkeypatch.delenv("JEV_TEST_ONLY", raising=False)
+    core.load_env(env)
+    assert os.environ["OPENROUTER_API_KEY"] == "from-env" and os.environ["JEV_TEST_ONLY"] == "x"
+    monkeypatch.delenv("JEV_TEST_ONLY")

@@ -3,13 +3,14 @@
 Jev decision modules, built on the official `typesafe-sdk`. Jev is the **only**
 external model — every other step is deterministic code.
 
-Transport is **TypeSafe's own API** (`api.typesafe.ai/v1/systemone`, model `jev-latest`,
-key `TYPESAFE_API_KEY`). The Vercel AI Gateway remains a legacy fallback used only when
-`AI_GATEWAY_API_KEY` is the sole key set — see "Transport" below.
+Transport is **OpenRouter's System One API** (`openrouter.ai/api/v1/systemone`, model
+`jev-latest`, key `OPENROUTER_API_KEY`), which serves TypeSafe's own API unchanged.
+`TYPESAFE_API_KEY` (api.typesafe.ai directly) and the legacy Vercel AI Gateway are used
+only when no OpenRouter key is set — see "Transport" below.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env      # set TYPESAFE_API_KEY
+cp .env.example .env      # set OPENROUTER_API_KEY
 python -m pytest tests/ -q
 ./install.sh all          # skills + hooks + policy + MCP registration for Claude Code
 ```
@@ -26,8 +27,17 @@ d=$(python3 -c 'import json,os;s=json.load(open(os.path.expanduser("~/.claude/se
 ```
 
 After the first run, `/jev-update` in Claude Code does the same. A new computer also
-needs `TYPESAFE_API_KEY` in `<repo>/.env`; without it only the local parts run. After
-switching keys, `claude mcp remove jev --scope user` and run `/jev-update` again.
+needs `OPENROUTER_API_KEY` in `<repo>/.env`; without a key only the local parts run. From
+1Password:
+
+```bash
+printf 'OPENROUTER_API_KEY=%s\n' "$(op read 'op://Foundation Five/OpenRouter API Key - Claude/credential')" >> .env
+```
+
+The hooks and the MCP server both read that file, and a key in `.env` outranks nothing
+already set in the environment, so an older `--env` registration keeps its key. A
+registration holding a *lower* key (TypeSafe or gateway) still switches to OpenRouter,
+because the server fills `OPENROUTER_API_KEY` from `.env` and OpenRouter comes first.
 
 ## Deploying to Claude Code
 
@@ -124,15 +134,15 @@ user-scope install does locally. On your own machine it exits immediately, and y
 local-scope `jev` server outranks the project one, so nothing runs twice.
 
 The VM has no `.env`, and the default **Trusted** network does not reach
-`api.typesafe.ai`. Edit the cloud environment at claude.ai/code:
+`openrouter.ai`. Edit the cloud environment at claude.ai/code:
 
 - **Pro / Max:** under **API credentials**, add a Bearer credential for
-  `api.typesafe.ai` with your TypeSafe key, and set the environment variable
-  `TYPESAFE_API_KEY=injected-by-proxy`. The proxy attaches the real key after the
+  `openrouter.ai` with your OpenRouter key, and set the environment variable
+  `OPENROUTER_API_KEY=injected-by-proxy`. The proxy attaches the real key after the
   request leaves the VM, so the session never sees it; the variable only tells Jev a
   key exists.
-- **Team / Enterprise** (no API credentials yet): set `TYPESAFE_API_KEY=...` as an
-  environment variable, switch network access to **Custom**, add `api.typesafe.ai`,
+- **Team / Enterprise** (no API credentials yet): set `OPENROUTER_API_KEY=...` as an
+  environment variable, switch network access to **Custom**, add `openrouter.ai`,
   and keep the default package-manager list. Anyone who can use the environment can
   read the variable.
 
@@ -191,7 +201,7 @@ problem, not a gap.
 ```bash
 vercel --prod                                    # vercel.json + api/index.py included
 # Vercel → Settings → Environment Variables:
-#   TYPESAFE_API_KEY   = your TypeSafe key
+#   OPENROUTER_API_KEY = your OpenRouter key (TYPESAFE_API_KEY also works)
 #   JEV_REMOTE_TOKEN   = a long random string
 ```
 
@@ -210,9 +220,20 @@ serving an open endpoint that spends your Jev quota.
 
 ## Transport
 
-TypeSafe's API is the transport whenever `TYPESAFE_API_KEY` is set. The Vercel AI
-Gateway is kept only for installs that still hold just `AI_GATEWAY_API_KEY`; with
-both set, TypeSafe is used and the gateway is never tried after a TypeSafe failure,
+| first key set | endpoint | model |
+|---|---|---|
+| `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1/systemone` | `jev-latest` (`JEV_OPENROUTER_MODEL`) |
+| `TYPESAFE_API_KEY` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` (`JEV_MODEL`) |
+| `AI_GATEWAY_API_KEY` | `https://ai-gateway.vercel.sh/v1/evaluate` | `typesafe-ai/jev` |
+
+OpenRouter serves TypeSafe's System One API with the same request and response shapes;
+it is exactly what the TypeSafe SDK calls with `base_url="https://openrouter.ai/api"`
+([guide](https://openrouter.ai/docs/guides/community/typesafe-sdk)). One difference:
+OpenRouter rejects a `noul` without `instructions`, so a criteria-only noul is sent
+with a neutral "answer by the criteria" line on that path only.
+
+The Vercel AI Gateway is kept only for installs that still hold just
+`AI_GATEWAY_API_KEY`. No transport is ever tried after another one fails,
 because a silent second route would hide the first one breaking. The dialects differ
 only on the wire (`noul` vs `boolean` for yes/no, snake_case vs camelCase usage), and
 tests pin both.

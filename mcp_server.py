@@ -9,7 +9,7 @@ files, not after: on a 188-file repository it cut 195,103 tokens to 3,947 for
 about a tenth of a cent. Everything else is safety and correctness.
 
 Run:
-    TYPESAFE_API_KEY=... python mcp_server.py
+    OPENROUTER_API_KEY=... python mcp_server.py   # or set it in the repo .env
 
 Register:
     claude mcp add jev -- python3 /abs/path/to/mcp_server.py
@@ -34,12 +34,15 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
 from core import (  # noqa: E402
-    Choice, Noul, Score, TransportError, active_transport, decide, unreachable,
+    Choice, Noul, Score, TransportError, active_transport, decide, load_env, unreachable,
 )
 from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
 from permission_gate import extract_commands, gate, triage  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
+
+# The same .env the hooks read; a key passed with `claude mcp add --env` still wins.
+load_env()
 
 mcp = MCPServer(
     "jev",
@@ -63,9 +66,9 @@ CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".r
 def _require_key() -> None:
     if not active_transport():
         raise ValueError(
-            "TYPESAFE_API_KEY is not set for this server process. Add it to the "
-            "server's env: `claude mcp add jev --env TYPESAFE_API_KEY=... -- "
-            "python3 mcp_server.py` (the legacy AI_GATEWAY_API_KEY also works)."
+            "No Jev key for this server process. Set OPENROUTER_API_KEY (or "
+            "TYPESAFE_API_KEY, or the legacy AI_GATEWAY_API_KEY) in the jev-agent "
+            ".env, or pass it with `claude mcp add jev --env OPENROUTER_API_KEY=...`."
         )
 
 

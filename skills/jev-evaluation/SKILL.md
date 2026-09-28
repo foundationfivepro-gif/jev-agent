@@ -20,13 +20,18 @@ parallel. Reach for it when the output is a *decision*, not prose.
 ## Endpoint
 
 ```
-POST https://api.typesafe.ai/v1/systemone          model: jev-latest
-Authorization: Bearer $TYPESAFE_API_KEY
+POST https://openrouter.ai/api/v1/systemone        model: jev-latest
+Authorization: Bearer $OPENROUTER_API_KEY
 ```
 
-`core.decide` uses this whenever `TYPESAFE_API_KEY` is set. Legacy fallback: the Vercel AI
-Gateway (`ai-gateway.vercel.sh/v1/evaluate`, model `typesafe-ai/jev`, `AI_GATEWAY_API_KEY`).
-OpenRouter uses `typesafe/jev-latest`. **The namespaces do not interchange.** Sending to
+The default. OpenRouter serves TypeSafe's System One API unchanged — the TypeSafe SDK
+reaches it with `base_url="https://openrouter.ai/api"` — and maps `jev-latest` to
+`~typesafe/jev-latest`. It rejects a `noul` without `instructions`.
+
+Without an OpenRouter key, `core.decide` uses `api.typesafe.ai/v1/systemone`
+(`TYPESAFE_API_KEY`, same body), then the legacy Vercel AI Gateway
+(`ai-gateway.vercel.sh/v1/evaluate`, model `typesafe-ai/jev`, `AI_GATEWAY_API_KEY`).
+**Gateway model ids do not interchange with the other two.** Sending to
 `/v1/chat/completions` returns `ModelTypeMismatchError`.
 
 ## Request
