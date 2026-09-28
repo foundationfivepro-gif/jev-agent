@@ -57,8 +57,8 @@ NONE_TEXT = "None of these skills is clearly needed for this request"
 STATE_FILE = Path(os.getenv("JEV_SKILL_ROUTER_STATE") or Path.home() / ".jev" / "skill-router.json")
 
 INSTRUCTIONS = (
-    "Which one skill should handle state.request? Choose the skill whose description "
-    "fits what the request asks for. Choose 'none' when no listed skill is clearly "
+    "Which one skill should handle the user request in `request`? Choose the skill whose "
+    "description fits what the request asks for. Choose 'none' when no listed skill is clearly "
     "needed." + UNTRUSTED
 )
 

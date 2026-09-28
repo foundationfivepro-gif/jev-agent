@@ -9,6 +9,10 @@ description: Call TypeSafe AI's Jev evaluation model (typesafe-ai/jev) for struc
 purpose-built tools do not cover. Raw HTTP details below for when you are writing the
 client rather than calling it.
 
+**Writing or changing Jev code**: also load the `typesafe-ai` skill (plugin
+`typesafe@typesafe-ai`, enabled in this repo's `.claude/settings.json`). Its live docs at
+docs.typesafe.ai are the source of truth for primitives, confidence and cookbooks.
+
 Jev is an **evaluation model**, not a language model. Give it shared state and typed
 questions; it returns choices, scores and probability distributions, all evaluated in
 parallel. Reach for it when the output is a *decision*, not prose.
