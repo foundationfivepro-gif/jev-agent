@@ -5,14 +5,18 @@ Jev is the ONLY external model in this system. Nothing here calls a generative
 model; every other step is deterministic code. That is a design constraint, not
 an accident — see context_tier.py for why it also produces a better result.
 
-Transport is the Vercel AI Gateway:
+Transport is TypeSafe's own API, chosen by which key is set:
 
+    TYPESAFE_API_KEY   -> api.typesafe.ai/v1/systemone, model jev-latest   (preferred)
     AI_GATEWAY_API_KEY -> ai-gateway.vercel.sh/v1/evaluate, model typesafe-ai/jev
 
-There is deliberately no second transport. A direct `api.typesafe.ai` path was
-written and then removed: with no TypeSafe key to exercise it, it would have
-been untested code reached only when something had already gone wrong. If that
-path is ever wanted, add it back *with* tests against a live key.
+The Vercel AI Gateway stays only as a fallback for installs that still hold
+just a gateway key. Both keys set means TypeSafe; the gateway is never tried
+after a TypeSafe failure, because a silent second route would hide the first
+one breaking. The two dialects differ only on the wire: the gateway calls the
+yes/no primitive `boolean` and answers it with `probability`, TypeSafe calls it
+`noul` both ways; usage keys are camelCase on one and snake_case on the other.
+Everything above the wire is identical.
 
 `typesafe_sdk` is still a dependency, but only for its question types. Those are
 pydantic models that reject a malformed `criteria` locally — a Score given a
@@ -47,8 +51,17 @@ __all__ = [
 
 # ---------------------------------------------------------------- configuration
 
+TYPESAFE_URL = os.getenv("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1")
+TYPESAFE_MODEL = os.getenv("JEV_MODEL", "jev-latest")
 GATEWAY_URL = os.getenv("AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
 GATEWAY_MODEL = os.getenv("JEV_GATEWAY_MODEL", "typesafe-ai/jev")
+
+# transport -> (key variable, endpoint, model, yes/no type name on the wire)
+TRANSPORTS = {
+    "typesafe": ("TYPESAFE_API_KEY", f"{TYPESAFE_URL}/systemone", TYPESAFE_MODEL, "noul"),
+    "gateway": ("AI_GATEWAY_API_KEY", f"{GATEWAY_URL}/evaluate", GATEWAY_MODEL, "boolean"),
+}
+NO_KEY = "No Jev key is set: add TYPESAFE_API_KEY (or the legacy AI_GATEWAY_API_KEY)."
 
 # Measured against this exact transport, so these are production numbers, not
 # estimates: ~150 questions succeed in isolation, 170+ returns a 503 that
@@ -126,8 +139,11 @@ PROBABILITY_SUM_TOLERANCE = 0.02
 
 
 def active_transport() -> str:
-    """'gateway', or '' when AI_GATEWAY_API_KEY is unset."""
-    return "gateway" if os.getenv("AI_GATEWAY_API_KEY") else ""
+    """'typesafe', 'gateway', or '' when neither key is set. TypeSafe wins when both are."""
+    for name, (key, *_rest) in TRANSPORTS.items():
+        if os.getenv(key):
+            return name
+    return ""
 
 
 # ---------------------------------------------------------------- result shape
@@ -192,16 +208,16 @@ class Decision:
 # ---------------------------------------------------------------- transports
 
 
-def _questions_to_wire(questions: Mapping[str, Any]) -> dict[str, dict]:
-    """Serialize SDK question objects into the gateway's JSON shape."""
+def _questions_to_wire(questions: Mapping[str, Any], noul_type: str = "noul") -> dict[str, dict]:
+    """Serialize SDK question objects into the wire's JSON shape."""
     wire: dict[str, dict] = {}
     for qid, q in questions.items():
         kind = getattr(q, "type", None)
         if kind is None:
             raise TypeError(f"question {qid!r} must be a Noul, Choice or Score")
-        # The gateway names the yes/no primitive 'boolean'; the SDK calls it
-        # 'noul'. Same question, same model — only the discriminator differs.
-        body: dict[str, Any] = {"type": "boolean" if kind == "noul" else kind}
+        # The gateway names the yes/no primitive 'boolean'; the SDK and TypeSafe
+        # call it 'noul'. Same question, same model — only the discriminator differs.
+        body: dict[str, Any] = {"type": noul_type if kind == "noul" else kind}
         if getattr(q, "instructions", None) is not None:
             body["instructions"] = q.instructions
         criteria = getattr(q, "criteria", None)
@@ -251,8 +267,8 @@ def _validate(wire: Mapping[str, dict], body: Any) -> None:
         confidence = a.get("confidence")
         if confidence is not None and not _probability(confidence):
             raise InvalidResponse(f"{qid}: confidence outside 0..1")
-        if kind == "boolean":
-            if not _probability(a.get("probability")):
+        if kind in ("boolean", "noul"):
+            if not _probability(a.get("probability" if kind == "boolean" else "noul")):
                 raise InvalidResponse(f"{qid}: probability outside 0..1")
         elif kind == "choice":
             criteria = question.get("criteria")
@@ -272,10 +288,11 @@ def _validate(wire: Mapping[str, dict], body: Any) -> None:
                 _check_distribution(qid, a["probabilities"], None)
 
 
-def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
-    key = os.environ["AI_GATEWAY_API_KEY"]
-    wire = _questions_to_wire(questions)
-    payload = json.dumps({"model": GATEWAY_MODEL, "state": state, "questions": wire}).encode()
+def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
+    key_var, url, model, noul_type = TRANSPORTS[transport]
+    key = os.environ[key_var]
+    wire = _questions_to_wire(questions, noul_type)
+    payload = json.dumps({"model": model, "state": state, "questions": wire}).encode()
     started = time.monotonic()
     answered = False
 
@@ -285,7 +302,7 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
         if remaining <= 0:
             break
         req = urllib.request.Request(
-            f"{GATEWAY_URL}/evaluate",
+            url,
             data=payload,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
@@ -297,7 +314,7 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:300]
             retryable = exc.code in (408, 429, 500, 502, 503, 504, 529)
-            last = TransportError(f"gateway {exc.code}: {detail}")
+            last = TransportError(f"{transport} {exc.code}: {detail}")
             if not retryable or attempt == RETRY.max_retries:
                 raise last from exc
             wait = float(exc.headers.get("retry-after") or 0) or min(
@@ -306,7 +323,7 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
         except OSError as exc:
             # URLError, and a timeout raised mid-read, which urllib does not wrap:
             # both mean no answer, and callers only catch TransportError.
-            last = TransportError(f"gateway unreachable: {getattr(exc, 'reason', exc)}")
+            last = TransportError(f"{transport} unreachable: {getattr(exc, 'reason', exc)}")
             if attempt == RETRY.max_retries:
                 raise last from exc
             wait = min(RETRY.backoff_initial * 2**attempt, RETRY.backoff_max)
@@ -317,7 +334,7 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
             break
         time.sleep(wait)
     else:  # pragma: no cover - loop always breaks or raises
-        raise last or TransportError("gateway call failed")
+        raise last or TransportError(f"{transport} call failed")
     if not answered:
         raise TransportError(
             f"no answer within {DEADLINE_S:g}s ({last or 'deadline reached'})"
@@ -330,6 +347,8 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
         kind = a.get("type")
         if kind == "boolean":
             answers[qid] = Answer("noul", a.get("probability"), None, None)
+        elif kind == "noul":
+            answers[qid] = Answer("noul", a.get("noul"), None, None)
         elif kind == "choice":
             answers[qid] = Answer("choice", a.get("choice"), a.get("confidence"), a.get("probabilities"))
         elif kind == "score":
@@ -337,10 +356,10 @@ def _call_gateway(state: Any, questions: Mapping[str, Any]) -> Decision:
     usage = body.get("usage") or {}
     return Decision(
         answers=answers,
-        model=body.get("model", GATEWAY_MODEL),
-        transport="gateway",
-        input_tokens=usage.get("inputTokens", 0),
-        output_tokens=usage.get("outputTokens", 0),
+        model=body.get("model", model),
+        transport=transport,
+        input_tokens=usage.get("input_tokens", usage.get("inputTokens", 0)),
+        output_tokens=usage.get("output_tokens", usage.get("outputTokens", 0)),
         latency_ms=latency_ms,
     )
 
@@ -366,9 +385,10 @@ def decide(state: Any, questions: Mapping[str, Any]) -> Decision:
             "use decide_batched()"
         )
 
-    if not active_transport():
-        raise TransportError("AI_GATEWAY_API_KEY is not set.")
-    return _call_gateway(state, questions)
+    transport = active_transport()
+    if not transport:
+        raise TransportError(NO_KEY)
+    return _call(transport, state, questions)
 
 
 def _chunks(items: Sequence[str], size: int) -> Iterator[Sequence[str]]:

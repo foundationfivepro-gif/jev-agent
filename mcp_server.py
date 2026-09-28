@@ -9,7 +9,7 @@ files, not after: on a 188-file repository it cut 195,103 tokens to 3,947 for
 about a tenth of a cent. Everything else is safety and correctness.
 
 Run:
-    AI_GATEWAY_API_KEY=... python mcp_server.py
+    TYPESAFE_API_KEY=... python mcp_server.py
 
 Register:
     claude mcp add jev -- python3 /abs/path/to/mcp_server.py
@@ -63,9 +63,9 @@ CODE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".r
 def _require_key() -> None:
     if not active_transport():
         raise ValueError(
-            "AI_GATEWAY_API_KEY is not set for this server process. Add it to the "
-            "server's env: `claude mcp add jev --env AI_GATEWAY_API_KEY=... -- "
-            "python3 mcp_server.py`."
+            "TYPESAFE_API_KEY is not set for this server process. Add it to the "
+            "server's env: `claude mcp add jev --env TYPESAFE_API_KEY=... -- "
+            "python3 mcp_server.py` (the legacy AI_GATEWAY_API_KEY also works)."
         )
 
 

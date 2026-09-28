@@ -45,7 +45,7 @@ Three properties hold because this runs on every event:
     recursive deletion of root, home or a wildcard.
 
 What leaves the machine: the prompt text (first MAX_TASK_CHARS) and, for
-commands that reach outside, the command line go to Jev through the gateway. Anything
+commands that reach outside, the command line go to Jev (TypeSafe's API). Anything
 credential-shaped is held back and not sent.
 
     python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md

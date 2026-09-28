@@ -34,7 +34,7 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 - Do not delegate what is already in your context.
 - Fable is escalation-only. Do not pick it, and do not second-guess the router downward.
 
-Prompt text and command lines go to Jev through the gateway; anything credential-shaped
+Prompt text and command lines go to Jev (TypeSafe's API); anything credential-shaped
 is held back locally.
 
 ## Verify

@@ -27,7 +27,7 @@ from permission_gate import extract_commands, hard_block_reason
 from security_router import LABEL_NAMES, SECRET, classify
 from symbols import extract
 
-live = pytest.mark.skipif(not active_transport(), reason="AI_GATEWAY_API_KEY not set")
+live = pytest.mark.skipif(not active_transport(), reason="no Jev key set")
 
 
 # ----------------------------------------------------------- permission gate
@@ -531,7 +531,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _hook(sub, payload, tmp_path):
     """Run a hook with NO key available, so nothing here touches the network."""
-    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
     return subprocess.run(
         [_sys.executable, os.path.join(ROOT, "hooks.py"), sub],
@@ -650,7 +650,7 @@ def test_long_paths_are_not_credential_shaped():
 
 
 def test_hook_traces_never_land_in_the_session_repo(tmp_path):
-    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "JEV_TRACE_DIR")}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY", "JEV_TRACE_DIR")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
     r = subprocess.run([_sys.executable, "-c", "import hooks, os; print(os.environ['JEV_TRACE_DIR'])"],
                        capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
@@ -779,6 +779,7 @@ def _gateway_reply(monkeypatch, body):
         def __exit__(self, *a):
             return False
 
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
     monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout: Resp(json.dumps(body).encode()))
 
@@ -878,7 +879,7 @@ def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch
     core.write_trace("model_router", {"task": "b"}, {"selected": "opus", "fallback": "low_confidence",
                      "latency_ms": 110}, meta={"tool_use_id": "t2"})
 
-    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY")}
     env.update(JEV_ENV_FILE=str(tmp_path / "absent.env"), JEV_TRACE_DIR=str(tmp_path))
     run = lambda payload: subprocess.run(
         [_sys.executable, os.path.join(ROOT, "hooks.py"), "agent-outcome"],

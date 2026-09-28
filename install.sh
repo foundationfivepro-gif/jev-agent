@@ -10,7 +10,7 @@
 #               policy (CLAUDE.md) in ~/.claude/CLAUDE.md; the two go together.
 #
 #   MCP server  The decision tools, chiefly jev_select_context, which runs
-#               before Claude reads files. Needs AI_GATEWAY_API_KEY.
+#               before Claude reads files. Needs TYPESAFE_API_KEY.
 #
 # Usage:
 #   ./install.sh skills | hooks | mcp | all
@@ -41,11 +41,11 @@ print_mcp() {
 
   Claude Code (desktop + CLI):
       claude mcp add jev \\
-        --env AI_GATEWAY_API_KEY=\$AI_GATEWAY_API_KEY \\
+        --env TYPESAFE_API_KEY=\$TYPESAFE_API_KEY \\
         -- $py "$HERE/mcp_server.py"
 
   Verify:
-      AI_GATEWAY_API_KEY=... $py "$HERE/mcp_server.py"   # should sit waiting on stdio
+      TYPESAFE_API_KEY=... $py "$HERE/mcp_server.py"   # should sit waiting on stdio
 
   The server is read-only: it decides, it never edits files or runs commands.
 EOF
