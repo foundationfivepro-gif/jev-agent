@@ -32,10 +32,10 @@ decision that repeats most often, measure it, then replace the next one.
 
 ## 2. Ask it
 
-Gateway (one key, `AI_GATEWAY_API_KEY`):
+TypeSafe (one key, `TYPESAFE_API_KEY`):
 
 ```
-POST https://ai-gateway.vercel.sh/v1/evaluate     model: typesafe-ai/jev
+POST https://api.typesafe.ai/v1/systemone         model: jev-latest
 ```
 
 The direct API is `typesafe-sdk` with model `jev-latest`, and OpenRouter uses

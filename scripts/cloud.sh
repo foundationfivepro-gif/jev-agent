@@ -9,7 +9,7 @@
 #   cloud.sh hook <sub>   run `hooks.py <sub>` (cloud only; `session` also installs deps)
 #   cloud.sh mcp          start mcp_server.py on stdio, installing deps first in the cloud
 #
-# The key: add AI_GATEWAY_API_KEY to the cloud environment. See README, "Cloud sessions".
+# The key: add TYPESAFE_API_KEY to the cloud environment. See README, "Cloud sessions".
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE=false; [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] && REMOTE=true

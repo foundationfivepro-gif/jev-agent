@@ -1,6 +1,6 @@
 ---
 name: jev-evaluation
-description: Call TypeSafe AI's Jev evaluation model (typesafe-ai/jev) for structured decisions — routing, classification, rubric scoring, relevance filtering, verification. Use when writing or debugging code that calls Jev, or choosing whether a decision belongs to Jev rather than a chat model.
+description: Write or debug code that calls Jev (TypeSafe's jev-latest) through this repo's core.decide — Noul, Choice and Score questions, thresholds, batching, response validation. Use when code asks Jev for a routing, classification, scoring, relevance or verification decision. For brainstorming what TypeSafe could add to a product, use typesafe-ai.
 ---
 
 # Jev — structured evaluation
@@ -9,6 +9,10 @@ description: Call TypeSafe AI's Jev evaluation model (typesafe-ai/jev) for struc
 purpose-built tools do not cover. Raw HTTP details below for when you are writing the
 client rather than calling it.
 
+**Writing or changing Jev code**: also load the `typesafe-ai` skill (plugin
+`typesafe@typesafe-ai`, enabled in this repo's `.claude/settings.json`). Its live docs at
+docs.typesafe.ai are the source of truth for primitives, confidence and cookbooks.
+
 Jev is an **evaluation model**, not a language model. Give it shared state and typed
 questions; it returns choices, scores and probability distributions, all evaluated in
 parallel. Reach for it when the output is a *decision*, not prose.
@@ -16,27 +20,29 @@ parallel. Reach for it when the output is a *decision*, not prose.
 ## Endpoint
 
 ```
-POST https://ai-gateway.vercel.sh/v1/evaluate      model: typesafe-ai/jev
-Authorization: Bearer $AI_GATEWAY_API_KEY
+POST https://api.typesafe.ai/v1/systemone          model: jev-latest
+Authorization: Bearer $TYPESAFE_API_KEY
 ```
 
-Direct API is `api.typesafe.ai` via `typesafe-sdk`, model id `jev-latest`. OpenRouter uses
-`typesafe/jev-latest`. **The three namespaces do not interchange.** Sending to
+`core.decide` uses this whenever `TYPESAFE_API_KEY` is set. Legacy fallback: the Vercel AI
+Gateway (`ai-gateway.vercel.sh/v1/evaluate`, model `typesafe-ai/jev`, `AI_GATEWAY_API_KEY`).
+OpenRouter uses `typesafe/jev-latest`. **The namespaces do not interchange.** Sending to
 `/v1/chat/completions` returns `ModelTypeMismatchError`.
 
 ## Request
 
 ```json
-{"model": "typesafe-ai/jev",
+{"model": "jev-latest",
  "state": {"ticket": "Checkout 500s when applying a coupon."},
  "questions": {
-   "is_bug":   {"type": "boolean", "instructions": "Is this a defect?"},
+   "is_bug":   {"type": "noul",    "instructions": "Is this a defect?"},
    "severity": {"type": "score",   "criteria": ["trivial","minor","major","critical"]},
    "team":     {"type": "choice",  "criteria": {"payments": "Billing", "infra": "Servers"}}}}
 ```
 
 `questions` is a **record keyed by id**, not an array. Each needs `criteria` or
-`instructions`. The SDK calls the yes/no type `noul`; the gateway calls it `boolean`.
+`instructions`. TypeSafe and the SDK call the yes/no type `noul` (answer field `noul`); the legacy gateway
+calls it `boolean` (answer field `probability`).
 
 ## ⚠ Question ids do NOT bind to state keys
 

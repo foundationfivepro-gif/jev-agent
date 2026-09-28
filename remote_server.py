@@ -7,7 +7,7 @@ Customize -> Connectors -> Add custom connector, pointing at `https://<host>/mcp
 
 WHAT IS AND IS NOT HERE, AND WHY
 
-Six tools are stateless — they judge what you pass them — so they work fine from
+Seven tools are stateless — they judge what you pass them — so they work fine from
 a server that has never seen your disk:
 
     jev_evaluate        arbitrary typed decisions
@@ -15,6 +15,7 @@ a server that has never seen your disk:
     jev_check_action    does a proposed action satisfy policy
     jev_gate_command    is this shell command safe to run
     jev_route_model     cheapest Claude model that should pass a task
+    jev_route_skill     which one skill should handle a request (you pass the list)
     jev_classify_paths  sensitivity from FILE PATHS ONLY
 
 Two tools are deliberately absent:
@@ -44,9 +45,9 @@ without it. Two ways to present it:
 
 The path form puts a credential in a URL, which ends up in logs and history.
 Prefer the header. If you use the path form, treat the token as disposable and
-rotate it freely — it grants only these six tools.
+rotate it freely — it grants only these seven tools.
 
-Run locally:   JEV_REMOTE_TOKEN=x AI_GATEWAY_API_KEY=... python remote_server.py
+Run locally:   JEV_REMOTE_TOKEN=x TYPESAFE_API_KEY=... python remote_server.py
 Deploy:        see vercel.json and api/index.py
 """
 
@@ -97,7 +98,7 @@ mcp = MCPServer(
 def _require_key() -> None:
     if not active_transport():
         raise ValueError(
-            "The server is missing AI_GATEWAY_API_KEY. This is a server-side "
+            "The server is missing TYPESAFE_API_KEY. This is a server-side "
             "configuration problem, not something you can fix from the client."
         )
 
@@ -152,6 +153,20 @@ class PathClassification(BaseModel):
         "innocuous name can still hold credentials. Use the local jev server's "
         "jev_classify_data for content scanning; it never transmits what it reads."
     )
+
+
+class SkillRouteDecision(BaseModel):
+    """Which one skill should handle a request, or 'none'."""
+
+    selected: str = Field(description=(
+        "Load this skill. 'none' means pick the normal way: nothing cleared the bar, "
+        "Jev was unavailable or slow, or no listed skill fits."))
+    proposed: str | None = Field(description="What Jev proposed before the confidence bar.")
+    confidence: float = Field(description="Jev's certainty in `proposed`, 0..1.")
+    reason: str
+    source: Literal["policy", "model", "timeout", "unavailable"]
+    note: str | None = Field(description="The one line to tell the user; null when 'none'.")
+    latency_ms: int
 
 
 # -------------------------------------------------------------------- tools
@@ -378,6 +393,29 @@ def jev_classify_paths(
     return PathClassification(label=LABEL_NAMES[label], reasons=reasons)
 
 
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
+                       "openWorldHint": True})
+def jev_route_skill(
+    request: Annotated[str, Field(description="The user's request, as they wrote it.")],
+    skills: Annotated[dict[str, str], Field(description=(
+        "{name: one-line description} of every skill available to you. This server "
+        "cannot see your skills, so pass the names and descriptions you were given."
+    ))],
+) -> SkillRouteDecision:
+    """
+    Which one of your skills should handle a request, or 'none'. Only points:
+    never runs a skill. On 'none', pick the skill the normal way.
+    """
+    import skill_router
+
+    d = skill_router.route_skill(request, skills)
+    return SkillRouteDecision(
+        selected=d["selected"], proposed=d.get("proposed"), confidence=d["confidence"],
+        reason=d["reason"], source=d["source"], note=skill_router.note(d),
+        latency_ms=d["latency_ms"],
+    )
+
+
 # ------------------------------------------------------------------- server
 
 
@@ -434,7 +472,7 @@ class PathToken(BaseHTTPMiddleware):
 
 
 async def health(_: Request) -> PlainTextResponse:
-    ready = "ok" if active_transport() else "missing AI_GATEWAY_API_KEY"
+    ready = "ok" if active_transport() else "missing TYPESAFE_API_KEY"
     auth = "token set" if TOKEN else "NO TOKEN — server will refuse requests"
     return PlainTextResponse(f"jev-remote: {ready}; auth: {auth}\n")
 

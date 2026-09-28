@@ -3,12 +3,13 @@
 Jev decision modules, built on the official `typesafe-sdk`. Jev is the **only**
 external model — every other step is deterministic code.
 
-Transport is the **Vercel AI Gateway** (`typesafe-ai/jev`). That is the only
-transport — see "One transport, on purpose" below.
+Transport is **TypeSafe's own API** (`api.typesafe.ai/v1/systemone`, model `jev-latest`,
+key `TYPESAFE_API_KEY`). The Vercel AI Gateway remains a legacy fallback used only when
+`AI_GATEWAY_API_KEY` is the sole key set — see "Transport" below.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env      # set AI_GATEWAY_API_KEY
+cp .env.example .env      # set TYPESAFE_API_KEY
 python -m pytest tests/ -q
 ./install.sh all          # skills + hooks + policy + MCP registration for Claude Code
 ```
@@ -25,7 +26,8 @@ d=$(python3 -c 'import json,os;s=json.load(open(os.path.expanduser("~/.claude/se
 ```
 
 After the first run, `/jev-update` in Claude Code does the same. A new computer also
-needs `AI_GATEWAY_API_KEY` in `<repo>/.env`; without it only the local parts run.
+needs `TYPESAFE_API_KEY` in `<repo>/.env`; without it only the local parts run. After
+switching keys, `claude mcp remove jev --scope user` and run `/jev-update` again.
 
 ## Deploying to Claude Code
 
@@ -121,18 +123,18 @@ point at `scripts/cloud.sh`, which acts only when `CLAUDE_CODE_REMOTE=true`: it 
 user-scope install does locally. On your own machine it exits immediately, and your
 local-scope `jev` server outranks the project one, so nothing runs twice.
 
-The VM has no `.env`, and the default **Trusted** network does not reach the gateway.
-Edit the cloud environment at claude.ai/code:
+The VM has no `.env`, and the default **Trusted** network does not reach
+`api.typesafe.ai`. Edit the cloud environment at claude.ai/code:
 
 - **Pro / Max:** under **API credentials**, add a Bearer credential for
-  `ai-gateway.vercel.sh` with your `vck_...` key, and set the environment variable
-  `AI_GATEWAY_API_KEY=injected-by-proxy`. The proxy attaches the real key after the
+  `api.typesafe.ai` with your TypeSafe key, and set the environment variable
+  `TYPESAFE_API_KEY=injected-by-proxy`. The proxy attaches the real key after the
   request leaves the VM, so the session never sees it; the variable only tells Jev a
   key exists.
-- **Team / Enterprise** (no API credentials yet): set `AI_GATEWAY_API_KEY=vck_...` as
-  an environment variable, switch network access to **Custom**, add
-  `ai-gateway.vercel.sh`, and keep the default package-manager list. Anyone who can use
-  the environment can read the variable.
+- **Team / Enterprise** (no API credentials yet): set `TYPESAFE_API_KEY=...` as an
+  environment variable, switch network access to **Custom**, add `api.typesafe.ai`,
+  and keep the default package-manager list. Anyone who can use the environment can
+  read the variable.
 
 Without a key the session still starts: the deterministic Bash hard block and the
 subagent return contract hold, and the SessionStart line reports `routing off (no key)`.
@@ -152,6 +154,7 @@ or runs commands. `./install.sh mcp` prints the registration.
 | `jev_gate_command` | commands that send, publish or deploy; the Bash hook runs it, so call directly only where no hook runs |
 | `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Fable is escalation-only |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
+| `jev_route_skill` | which one skill should handle a request, or `none` (pick normally). Local reads installed skills; remote takes the list. Per-message suggestion: `python3 skill_router.py on` (default off). See `skills/skill-routing` |
 
 ## Universal reach: local vs remote
 
@@ -175,7 +178,7 @@ deliberately reduced:
 
 | tool | remote | why |
 |---|---|---|
-| `jev_evaluate`, `jev_should_run`, `jev_check_action`, `jev_gate_command` | yes | pure logic, judge what you pass them |
+| `jev_evaluate`, `jev_should_run`, `jev_check_action`, `jev_gate_command`, `jev_route_skill` | yes | pure logic, judge what you pass them (the skill list is passed in) |
 | `jev_select_context` | **no** | its saving comes from reading *your* repository; a remote version would have to upload the codebase to answer the same question |
 | `jev_file_outline` | **no** | same reason |
 | `jev_classify_data` → `jev_classify_paths` | reduced | the local version scans file **content** and never transmits it. A remote content scanner requires uploading the material it exists to protect — worse than none, because it is trusted. The remote variant takes paths only, and says so in its output |
@@ -188,7 +191,7 @@ problem, not a gap.
 ```bash
 vercel --prod                                    # vercel.json + api/index.py included
 # Vercel → Settings → Environment Variables:
-#   AI_GATEWAY_API_KEY = vck_...
+#   TYPESAFE_API_KEY   = your TypeSafe key
 #   JEV_REMOTE_TOKEN   = a long random string
 ```
 
@@ -205,20 +208,23 @@ disposable.
 **With no `JEV_REMOTE_TOKEN` the server refuses every request** rather than
 serving an open endpoint that spends your Jev quota.
 
-## One transport, on purpose
+## Transport
 
-A direct `api.typesafe.ai` path was written and removed. With no TypeSafe key to
-exercise it, it would have been untested code reached only when something had
-already gone wrong — the worst kind to ship.
+TypeSafe's API is the transport whenever `TYPESAFE_API_KEY` is set. The Vercel AI
+Gateway is kept only for installs that still hold just `AI_GATEWAY_API_KEY`; with
+both set, TypeSafe is used and the gateway is never tried after a TypeSafe failure,
+because a silent second route would hide the first one breaking. The dialects differ
+only on the wire (`noul` vs `boolean` for yes/no, snake_case vs camelCase usage), and
+tests pin both.
 
 `typesafe-sdk` remains a dependency for its question *types* only. They are
 pydantic models that reject a malformed `criteria` before any network call — a
 Score handed a string, a Choice handed a list — which is the single easiest
 mistake to make with this API. The SDK's client is unused.
 
-Because the gateway is the production transport, every number below was measured
-on the path that will actually run. They are not estimates carried over from a
-different endpoint.
+The numbers below were measured through the Vercel AI Gateway, which serves the same
+Jev model. Re-measure the ceilings (MAX_QUESTIONS, MAX_PAYLOAD_CHARS) against
+`api.typesafe.ai` before relying on them there.
 
 ## Modules
 

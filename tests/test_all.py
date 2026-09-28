@@ -27,7 +27,7 @@ from permission_gate import extract_commands, hard_block_reason
 from security_router import LABEL_NAMES, SECRET, classify
 from symbols import extract
 
-live = pytest.mark.skipif(not active_transport(), reason="AI_GATEWAY_API_KEY not set")
+live = pytest.mark.skipif(not active_transport(), reason="no Jev key set")
 
 
 # ----------------------------------------------------------- permission gate
@@ -361,7 +361,8 @@ def test_every_module_has_a_skill_or_is_internal():
         open(os.path.join(root, "skills", d, "SKILL.md")).read()
         for d in os.listdir(os.path.join(root, "skills"))
     )
-    for term in ("should_run", "check_action", "include, index", "jev_route_model"):
+    for term in ("should_run", "check_action", "include, index", "jev_route_model",
+                 "jev_route_skill"):
         assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"
 
 
@@ -379,7 +380,8 @@ def test_remote_server_excludes_filesystem_tools():
     assert "jev_select_context" not in names
     assert "jev_file_outline" not in names
     assert names == {"jev_evaluate", "jev_should_run", "jev_check_action",
-                     "jev_gate_command", "jev_route_model", "jev_classify_paths"}
+                     "jev_gate_command", "jev_route_model", "jev_classify_paths",
+                     "jev_route_skill"}
 
 
 def test_remote_never_accepts_file_content():
@@ -529,7 +531,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _hook(sub, payload, tmp_path):
     """Run a hook with NO key available, so nothing here touches the network."""
-    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
     return subprocess.run(
         [_sys.executable, os.path.join(ROOT, "hooks.py"), sub],
@@ -648,7 +650,7 @@ def test_long_paths_are_not_credential_shaped():
 
 
 def test_hook_traces_never_land_in_the_session_repo(tmp_path):
-    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "JEV_TRACE_DIR")}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY", "JEV_TRACE_DIR")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
     r = subprocess.run([_sys.executable, "-c", "import hooks, os; print(os.environ['JEV_TRACE_DIR'])"],
                        capture_output=True, text=True, env=env, cwd=ROOT, timeout=60)
@@ -777,6 +779,7 @@ def _gateway_reply(monkeypatch, body):
         def __exit__(self, *a):
             return False
 
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
     monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout: Resp(json.dumps(body).encode()))
 
@@ -876,7 +879,7 @@ def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch
     core.write_trace("model_router", {"task": "b"}, {"selected": "opus", "fallback": "low_confidence",
                      "latency_ms": 110}, meta={"tool_use_id": "t2"})
 
-    env = {k: v for k, v in os.environ.items() if k != "AI_GATEWAY_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY")}
     env.update(JEV_ENV_FILE=str(tmp_path / "absent.env"), JEV_TRACE_DIR=str(tmp_path))
     run = lambda payload: subprocess.run(
         [_sys.executable, os.path.join(ROOT, "hooks.py"), "agent-outcome"],
@@ -965,6 +968,7 @@ def _quiet_gateway(monkeypatch, fail, deadline=15.0):
 
     clock = _Clock()
     timeouts = []
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)   # pin the gateway dialect
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
     monkeypatch.setattr(core, "DEADLINE_S", deadline)
     monkeypatch.setattr(core.time, "monotonic", clock.monotonic)
@@ -1024,6 +1028,7 @@ def _jev_down(monkeypatch, mod):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
     monkeypatch.setattr(harness, "should_run", down)
     monkeypatch.setattr(model_router, "route_model", down)
+    monkeypatch.setattr(mod, "route_model", down)   # imported by name; a real key must not answer
     monkeypatch.setattr(mod, "decide", down)
 
 
