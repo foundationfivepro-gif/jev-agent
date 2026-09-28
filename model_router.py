@@ -46,7 +46,7 @@ MIN_FALLBACK_MASS = 0.2
 
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
-# Fable is the top of the range, not a cheap tier: it costs twice Opus. It is
+# Fable is the top of the range, not a cheap tier: it costs 2.5x Opus. It is
 # escalation_only — Jev may propose it with confidence, but an *uncertain* route
 # falls back to an ordinary tier (at most Opus), never up to Fable.
 DEFAULT_CATALOG: dict[str, dict] = {
@@ -58,10 +58,11 @@ DEFAULT_CATALOG: dict[str, dict] = {
                "fit": "Normal coding, research, multi-file edits, "
                       "most day-to-day engineering",
                "cost_in": 2.0, "cost_out": 10.0, "tier": 2},
-    "opus":   {"id": "claude-opus-5",
+    # Opus 5.5 replaces Opus 5 in the Opus line at a lower price ($5/$25 -> $4/$20).
+    "opus":   {"id": "claude-opus-5-5",
                "fit": "Complex architecture, hard debugging, subtle refactors, "
                       "work where a wrong answer is expensive to detect",
-               "cost_in": 5.0, "cost_out": 25.0, "tier": 3},
+               "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
     "fable":  {"id": "claude-fable-5-1",
                "fit": "Frontier complexity: long-horizon architecture, system design "
                       "and complex multi-page web design where a wrong structural "

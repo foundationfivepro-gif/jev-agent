@@ -64,10 +64,10 @@ The catalog, USD per million tokens, first-party rates:
 |---|---|---|---|---|
 | `haiku` | claude-haiku-4-5 | 1 | 5 | classify, format, search-and-report |
 | `sonnet` | claude-sonnet-5 | 2 | 10 | day-to-day coding and research |
-| `opus` | claude-opus-5 | 5 | 25 | hard debugging, subtle refactors |
+| `opus` | claude-opus-5-5 | 4 | 20 | hard debugging, subtle refactors |
 | `fable` | claude-fable-5-1 | 10 | 50 | frontier architecture and design, where a wrong structural decision is expensive to unwind |
 
-**Fable is the top of the range, not a cheap tier.** It costs twice Opus. It is
+**Fable is the top of the range, not a cheap tier.** It costs 2.5 times Opus. It is
 escalation-only: the router returns it when Jev proposes it with confidence, never as the
 fallback for an uncertain route and never as a default for routine subtasks.
 
