@@ -138,6 +138,7 @@ def test_credential_shaped_request_is_not_sent(monkeypatch):
 
 
 def test_large_catalog_runs_groups_then_a_final_between_winners(monkeypatch):
+    monkeypatch.setattr(skill_router, "GROUP_SIZE", 30)
     skills = {f"s{i:03d}": f"skill number {i}" for i in range(70)}
     favourites = {"s005", "s040"}
 
@@ -157,11 +158,52 @@ def test_large_catalog_runs_groups_then_a_final_between_winners(monkeypatch):
 
 
 def test_a_lone_group_winner_skips_the_final(monkeypatch):
+    monkeypatch.setattr(skill_router, "GROUP_SIZE", 30)
     skills = {f"s{i:03d}": f"skill number {i}" for i in range(70)}
     calls = _fake(monkeypatch, lambda qid, c: ("s005", 0.75) if "s005" in c else ("none", 0.9))
     d = skill_router.route_skill("x", skills)
     assert d["selected"] == "s005" and d["rounds"] == 1
     assert not any("final" in call for call in calls)
+
+
+def test_seventy_skills_go_in_one_question(monkeypatch):
+    """A Choice takes 255 options; splitting a list that fits only loses context."""
+    calls = _fake(monkeypatch, lambda qid, c: ("s005", 0.9))
+    d = skill_router.route_skill("x", {f"s{i:03d}": f"skill {i}" for i in range(70)})
+    assert d["groups"] == 1 and len(calls) == 1 and len(calls[0]["g0"]) == 71
+
+
+def test_bar_is_on_probability_not_confidence(monkeypatch):
+    """Confidence shrinks with fewer options; the chosen skill's probability does not."""
+    def decide(state, questions):
+        return Decision({"g0": Answer("choice", "xlsx", 0.40, {"xlsx": 0.65, "docx": 0.30, "none": 0.05})},
+                        "jev", "gateway", 1, 1)
+
+    monkeypatch.setattr(skill_router, "decide", decide)
+    d = skill_router.route_skill("chart this csv", SKILLS)
+    assert d["selected"] == "xlsx" and d["confidence"] == 0.65 and d["jev_confidence"] == 0.4
+    assert d["separation"] == round(0.65 / 0.30, 2)
+
+
+def test_beam_lets_a_group_runner_up_win_the_final(monkeypatch):
+    monkeypatch.setattr(skill_router, "GROUP_SIZE", 30)
+    skills = {f"s{i:03d}": f"skill number {i}" for i in range(70)}
+
+    def decide(state, questions):
+        out = {}
+        for qid, q in questions.items():
+            if qid == "final":
+                out[qid] = Answer("choice", "s002", 0.5, {"s002": 0.8, "s001": 0.15, "none": 0.05})
+            elif "s001" in q.criteria:
+                out[qid] = Answer("choice", "s001", 0.4, {"s001": 0.5, "s002": 0.45, "none": 0.05})
+            else:
+                out[qid] = Answer("choice", "none", 0.9, {"none": 0.95, "s040": 0.05})
+        return Decision(out, "jev", "gateway", 1, 1)
+
+    monkeypatch.setattr(skill_router, "decide", decide)
+    d = skill_router.route_skill("x", skills)
+    assert d["rounds"] == 2 and d["selected"] == "s002"
+    assert d["confidence"] == round((0.45 * 0.8) ** 0.5, 3)
 
 
 # ------------------------------------------------------------------ switch and hook

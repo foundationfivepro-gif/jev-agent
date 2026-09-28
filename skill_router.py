@@ -4,8 +4,8 @@ Skill router: Jev points at the one skill that should handle a request.
 
 The same shape as tool_router.py. The catalog is built in code from the skills
 actually installed, "none" is always an option, a name that is not in the
-catalog becomes "none", and low confidence collapses to "none" rather than to a
-guess. Jev only points: nothing here runs a skill or writes anything but a trace.
+catalog becomes "none", and a low probability collapses to "none" rather than
+to a guess. Jev only points: nothing here runs a skill or writes anything but a trace.
 
     python3 skill_router.py try "turn this csv into a chart"
     python3 skill_router.py list                     # what Jev would choose from
@@ -18,12 +18,20 @@ and the skills of enabled plugins, named `plugin:skill` as the Skill tool names
 them. It is re-read from disk on every call: frontmatter only, a few KB per
 skill, so it can never be stale and there is no cache to invalidate.
 
-Large catalogs. One Choice over ~180 long descriptions exceeds the gateway's
-request budget. Skills are split into groups, each asked as its own Choice with
-"none"; all groups go out in parallel calls, then winners that cleared the bar
-meet in a final round, again with "none". A lone winner skips the final round:
-a two-way final against "none" only restates the group answer with inflated
-confidence.
+The bar is on probability, not confidence. TypeSafe's Choice confidence is
+roughly (n * peak - 1) / (n - 1), so it depends on the number of options: a 60%
+peak is 0.58 confidence among 23 options and 0.40 among 3. A bar on confidence
+would mean something different in every round. The chosen skill's probability
+means the same thing at any size (docs.typesafe.ai/confidence).
+
+Large catalogs. A Choice takes up to 255 options and the docs say to give it the
+full list, so one question is the normal case. Only when the descriptions exceed
+the gateway's request budget (MAX_PAYLOAD_CHARS, measured in core.py) are skills
+split into groups, each with "none", asked in parallel. Following the TypeSafe
+hierarchical-classification cookbook, this is a beam search, not a knockout: the
+top BEAM skills of each group with at least FLOOR probability go to a final
+round (again with "none"), and a finalist's score is the geometric mean of its
+group and final probabilities, so a close call in one group can still win.
 
 Latency. The whole thing, both rounds, runs under DEADLINE_MS (500ms). Past it
 the answer is "none" with source "timeout" and the caller picks the normal way;
@@ -46,9 +54,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import MAX_PAYLOAD_CHARS, UNTRUSTED, Choice, TransportError, decide, write_trace  # noqa: E402
 
-MIN_CONFIDENCE = float(os.getenv("JEV_SKILL_MIN_CONFIDENCE", "0.60"))
+MIN_PROBABILITY = float(os.getenv("JEV_SKILL_MIN_PROBABILITY", "0.60"))
 DEADLINE_MS = int(os.getenv("JEV_SKILL_DEADLINE_MS", "500"))
-GROUP_SIZE = 30                 # options per Choice; small groups keep the choice sharp
+GROUP_SIZE = 254                # a Choice takes 255 options; one is "none"
+BEAM = 2                        # candidates per group carried to the final round
+FLOOR = 0.10                    # below this a group candidate is not worth a final slot
 DESCRIPTION_CHARS = 400         # enough for "what it's for" and "when to use it"
 MAX_REQUEST_CHARS = 2000
 NONE = "none"
@@ -162,7 +172,7 @@ def build_catalog(project: str | Path | None = None, home: str | Path | None = N
 
 
 def _groups(names: Sequence[str], descriptions: Mapping[str, str]) -> list[list[str]]:
-    budget = MAX_PAYLOAD_CHARS // 2      # a group must fit in one call with room to spare
+    budget = MAX_PAYLOAD_CHARS * 3 // 4  # a group must fit in one call with room to spare
     groups: list[list[str]] = []
     group: list[str] = []
     size = 0
@@ -231,12 +241,25 @@ def _none(reason: str, source: str, **extra: Any) -> dict:
             "source": source, **extra}
 
 
+def _distribution(answer: Any) -> dict[str, float]:
+    probs = {str(k): float(v) for k, v in (answer.probabilities or {}).items()}
+    return probs or {str(answer.value): answer.certainty}
+
+
+def _separation(probs: Mapping[str, float]) -> float | None:
+    """Top probability over the runner-up: near 1x is ambiguous (the cookbook's metric)."""
+    top = sorted(probs.values(), reverse=True)
+    if len(top) < 2:
+        return None
+    return round(top[0] / top[1], 2) if top[1] > 0 else None
+
+
 def route_skill(
     request: str,
     catalog: Mapping[str, Mapping[str, Any] | str] | None = None,
     *,
     project: str | Path | None = None,
-    min_confidence: float = MIN_CONFIDENCE,
+    min_probability: float = MIN_PROBABILITY,
     deadline_ms: int = DEADLINE_MS,
 ) -> dict:
     """
@@ -244,14 +267,16 @@ def route_skill(
 
     `catalog` maps skill name -> description (or {description, ...}); omitted,
     it is read from disk. Never raises: every failure is "none" with a source
-    that says why, so the caller picks the normal way.
+    that says why, so the caller picks the normal way. `confidence` in the
+    result is the probability the bar was applied to; `jev_confidence` is Jev's
+    own concentration statistic for the deciding question.
     """
     started = time.monotonic()
     deadline = started + deadline_ms / 1000
 
     def done(decision: dict) -> dict:
         decision["latency_ms"] = int((time.monotonic() - started) * 1000)
-        decision["min_confidence"] = min_confidence
+        decision["min_probability"] = min_probability
         write_trace("skill_router", {"request": request}, decision)
         return decision
 
@@ -281,36 +306,34 @@ def route_skill(
         if first is None:
             return done(_none(f"no answer within {deadline_ms}ms", "timeout", rounds=1))
 
-        winners: dict[str, float] = {}
-        probabilities: dict[str, float] = {}
-        for i, group in enumerate(groups):
-            a = first.get(f"g{i}")
-            if a is None:
-                continue
-            pick = str(a.value)
-            if pick in group and a.certainty >= min_confidence:
-                winners[pick] = a.certainty
-            for k, v in (a.probabilities or {}).items():
-                if k != NONE or len(groups) == 1:
-                    probabilities[str(k)] = float(v)
-
         if len(groups) == 1:
-            a = first.get("g0")
-            proposed = None if a is None else str(a.value)
-            confidence = 0.0 if a is None else a.certainty
-            rounds = 1
-        elif len(winners) <= 1:
-            proposed = next(iter(winners), NONE)
-            confidence = winners.get(proposed, 0.0)
-            rounds = 1
+            a = first["g0"]
+            probs = _distribution(a)
+            proposed = str(a.value)
+            score, jev_conf, rounds = probs.get(proposed, 0.0), a.certainty, 1
         else:
-            final = _parallel(state, [{"final": _question(sorted(winners), descriptions)}], deadline)
-            if final is None:
-                return done(_none(f"final round missed the {deadline_ms}ms deadline", "timeout",
-                                  rounds=2, finalists=sorted(winners)))
-            a = final["final"]
-            proposed, confidence, rounds = str(a.value), a.certainty, 2
-            probabilities = {str(k): float(v) for k, v in (a.probabilities or {}).items()}
+            finalists: dict[str, float] = {}
+            for i, group in enumerate(groups):
+                a = first.get(f"g{i}")
+                if a is None:
+                    continue
+                ranked = sorted(((p, n) for n, p in _distribution(a).items() if n in group), reverse=True)
+                finalists.update({n: p for p, n in ranked[:BEAM] if p >= FLOOR})
+            if not finalists:
+                return done(_none("none of these", "model", rounds=1, groups=len(groups)))
+            if len(finalists) == 1:
+                [(proposed, score)] = finalists.items()
+                probs, jev_conf, rounds = dict(finalists), None, 1
+            else:
+                final = _parallel(state, [{"final": _question(sorted(finalists), descriptions)}], deadline)
+                if final is None:
+                    return done(_none(f"final round missed the {deadline_ms}ms deadline", "timeout",
+                                      rounds=2, finalists=sorted(finalists)))
+                a = final["final"]
+                probs = _distribution(a)
+                proposed, jev_conf, rounds = str(a.value), a.certainty, 2
+                # Geometric mean of the path's two decisions, as in the cookbook's beam search.
+                score = (finalists[proposed] * probs.get(proposed, 0.0)) ** 0.5 if proposed in finalists else 0.0
     except TransportError as exc:
         return done(_none(f"Jev unavailable ({exc})", "unavailable"))
     except Exception as exc:  # a malformed answer is no answer
@@ -318,15 +341,17 @@ def route_skill(
 
     # A name back from the model is checked against the catalog before anyone acts on it.
     valid = proposed in descriptions
-    selected = proposed if valid and confidence >= min_confidence else NONE
+    selected = proposed if valid and score >= min_probability else NONE
     reason = ("picked" if selected != NONE
-              else "not in the skill list" if proposed not in (None, NONE) and not valid
+              else "not in the skill list" if proposed != NONE and not valid
               else "below the bar" if valid else "none of these")
-    top = dict(sorted(probabilities.items(), key=lambda kv: -kv[1])[:5])
+    top = dict(sorted(probs.items(), key=lambda kv: -kv[1])[:5])
     return done({
-        "selected": selected, "proposed": proposed, "confidence": round(confidence, 3),
-        "reason": reason, "source": "model", "rounds": rounds, "groups": len(groups),
-        "skills": len(descriptions), "probabilities": {k: round(v, 3) for k, v in top.items()},
+        "selected": selected, "proposed": proposed, "confidence": round(score, 3),
+        "jev_confidence": None if jev_conf is None else round(jev_conf, 3),
+        "separation": _separation(probs), "reason": reason, "source": "model",
+        "rounds": rounds, "groups": len(groups), "skills": len(descriptions),
+        "probabilities": {k: round(v, 3) for k, v in top.items()},
         "path": raw.get(selected, {}).get("path") if isinstance(raw.get(selected), Mapping) else None,
     })
 
