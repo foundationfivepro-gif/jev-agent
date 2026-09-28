@@ -16,7 +16,7 @@ repositories whose CLAUDE.md says so.
     UserPromptSubmit          prompt        one Jev call per prompt; a one-line note
                                             only when repository context is needed.
                                             With `skill_router.py on` (default off),
-                                            also names the skill Jev picked; 500ms cap.
+                                            also names the skill Jev picked; 800ms cap.
     PreToolUse   Bash         gate-bash     denies the irreversible (no key needed);
                                             runs jev_gate_command only on commands that
                                             send, publish or deploy. Local commands get

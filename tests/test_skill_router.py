@@ -78,6 +78,12 @@ def test_catalog_reads_user_nested_project_and_enabled_plugin_skills(tmp_path):
     assert cat["good:tool"]["description"] == "good plugin skill"
 
 
+def test_catalog_names_skills_by_folder_like_claude_code(tmp_path):
+    home = tmp_path / "home"
+    _skill(home / ".claude" / "skills", "startup-hook-skill", "Startup hooks", folder="session-start-hook")
+    assert set(skill_router.build_catalog(home=home)) == {"session-start-hook"}
+
+
 def test_catalog_is_reread_so_a_new_skill_shows_up(tmp_path):
     home = tmp_path / "home"
     _skill(home / ".claude" / "skills", "one", "first")
@@ -280,3 +286,36 @@ def test_evaluate_labels_outcomes_and_sweeps_the_bar(monkeypatch):
     by_bar = {s["bar"]: s for s in skill_router.sweep(rows)}
     assert by_bar[0.5]["hit"] == 3 and by_bar[0.8]["wrong-above-bar"] == 0
     assert "wrong-above-bar" in skill_router.table(rows)
+
+
+# ------------------------------------------------------------------ simulator
+
+def test_simulator_rescores_any_bar_and_limit_from_one_measured_run(monkeypatch):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+    import simulate_skills
+
+    answers = {"make a word doc": ("docx", 0.9), "merge pdfs": ("docx", 0.7),
+               "chart this csv": ("xlsx", 0.5), "hello": ("none", 0.95)}
+    monkeypatch.setattr(skill_router, "decide", lambda state, q: Decision(
+        {"g0": _choice(*answers[state["request"]])}, "jev", "gateway", 1, 1))
+    catalog = {k: {"description": v} for k, v in SKILLS.items()}
+    cases = [{"request": "make a word doc", "expected": "docx", "kind": "clear"},
+             {"request": "merge pdfs", "expected": "pdf", "kind": "near-miss"},
+             {"request": "chart this csv", "expected": "xlsx", "kind": "near-miss"},
+             {"request": "hello", "expected": "none", "kind": "none"},
+             {"request": "draw a logo", "expected": "canva", "kind": "clear"}]
+    usable, skipped = simulate_skills.load_cases_from(cases, catalog)
+    assert [c["request"] for c in skipped] == ["draw a logo"]
+
+    rows = simulate_skills.run(usable, catalog, repeat=2, workers=2, measure_ms=5000)
+    rep = simulate_skills.report(rows, skipped, bar=0.6, limit_ms=800, repeat=2)
+    assert rep["calls"] == 8 and rep["outcomes"] == {"hit": 4, "wrong-above-bar": 2, "fell back": 2}
+    assert rep["by_kind"]["near-miss"] == {"wrong-above-bar": 2, "fell back": 2}
+    assert {"expected": "pdf", "picked": "docx", "kind": "near-miss", "count": 2} in rep["confusion"]
+    assert {b["bar"]: b["hit"] for b in rep["bars"]}[0.5] == 6
+
+    for r in rows:                      # every call slower than the limit -> all fall back
+        r["latency_ms"] = 900
+    late = simulate_skills.report(rows, skipped, bar=0.6, limit_ms=800, repeat=2)
+    assert late["outcomes"] == {"hit": 2, "fell back": 6}   # only "none" cases still hit
+    assert "Misses" in simulate_skills.render(rep, catalog)

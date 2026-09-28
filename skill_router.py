@@ -33,7 +33,7 @@ top BEAM skills of each group with at least FLOOR probability go to a final
 round (again with "none"), and a finalist's score is the geometric mean of its
 group and final probabilities, so a close call in one group can still win.
 
-Latency. The whole thing, both rounds, runs under DEADLINE_MS (500ms). Past it
+Latency. The whole thing, both rounds, runs under DEADLINE_MS (800ms). Past it
 the answer is "none" with source "timeout" and the caller picks the normal way;
 the unfinished call is abandoned, never awaited. The same holds for any
 transport error: this router can make a pick worse, never block a message.
@@ -55,7 +55,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core import MAX_PAYLOAD_CHARS, UNTRUSTED, Choice, TransportError, decide, write_trace  # noqa: E402
 
 MIN_PROBABILITY = float(os.getenv("JEV_SKILL_MIN_PROBABILITY", "0.60"))
-DEADLINE_MS = int(os.getenv("JEV_SKILL_DEADLINE_MS", "500"))
+# Measured on api.typesafe.ai with 23 skills: 20 calls, 309-564ms, median 346.
+# 500ms dropped 1 in 20 suggestions; 800ms kept all of them.
+DEADLINE_MS = int(os.getenv("JEV_SKILL_DEADLINE_MS", "800"))
 GROUP_SIZE = 254                # a Choice takes 255 options; one is "none"
 BEAM = 2                        # candidates per group carried to the final round
 FLOOR = 0.10                    # below this a group candidate is not worth a final slot
@@ -111,7 +113,10 @@ def _scan(root: Path, prefix: str = "") -> dict[str, dict]:
         if len(md.relative_to(root).parts) > 5:
             continue
         meta = _frontmatter(md)
-        name = meta.get("name") or md.parent.name
+        # The folder is the name Claude Code loads the skill by; a frontmatter
+        # `name` can differ (session-start-hook/ declares startup-hook-skill),
+        # and pointing at the frontmatter name names a skill that cannot load.
+        name = md.parent.name
         if not meta.get("description") or name == NONE:
             continue
         found.setdefault(prefix + name, {"description": meta["description"], "path": str(md)})
@@ -399,6 +404,7 @@ def evaluate(cases: Sequence[Mapping[str, str]], catalog: Mapping[str, Any], **k
         rows.append({"request": case["request"], "expected": case.get("expected") or NONE,
                      "picked": d["selected"], "proposed": d.get("proposed"),
                      "confidence": d["confidence"], "source": d["source"],
+                     "separation": d.get("separation"), "latency_ms": d.get("latency_ms"),
                      "outcome": outcome(case.get("expected") or NONE, d["selected"])})
     return rows
 

@@ -15,7 +15,7 @@ and never writes anything.
   - the picked skill's probability is under the bar (0.60)
   - Jev chose "none of these"
   - Jev named a skill that is not on the list
-  - Jev failed or took longer than 500ms (`source` `timeout` or `unavailable`)
+  - Jev failed or took longer than 800ms (`source` `timeout` or `unavailable`)
 
   None of these is an error, so don't report it.
 
@@ -40,7 +40,7 @@ only when the switch is on:
 ```
 python3 skill_router.py on | off | status     # or JEV_SKILL_ROUTER=1 for one shell
 ```
-The suggestion never blocks a message. Past 500ms, or when Jev is down, the hook adds nothing.
+The suggestion never blocks a message. Past 800ms, or when Jev is down, the hook adds nothing.
 
 **Why probability, not confidence.** Jev's Choice `confidence` depends on how many options
 there are: a 60% peak is 0.58 confidence among 23 options but 0.40 among 3. The bar is on
