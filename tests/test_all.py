@@ -968,6 +968,7 @@ def _quiet_gateway(monkeypatch, fail, deadline=15.0):
 
     clock = _Clock()
     timeouts = []
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)   # pin the gateway dialect
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
     monkeypatch.setattr(core, "DEADLINE_S", deadline)
     monkeypatch.setattr(core.time, "monotonic", clock.monotonic)
@@ -1027,6 +1028,7 @@ def _jev_down(monkeypatch, mod):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
     monkeypatch.setattr(harness, "should_run", down)
     monkeypatch.setattr(model_router, "route_model", down)
+    monkeypatch.setattr(mod, "route_model", down)   # imported by name; a real key must not answer
     monkeypatch.setattr(mod, "decide", down)
 
 
