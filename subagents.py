@@ -25,7 +25,9 @@ from typing import Callable, Mapping
 
 from core import Choice, decide, write_trace
 
-MIN_CONFIDENCE = 0.75
+# The chosen plan's probability; 5/6 is what the former 0.75 confidence bar
+# meant among these three plans, so behaviour is unchanged.
+MIN_PROBABILITY = 5 / 6
 WORKER_TIMEOUT = 60
 
 
@@ -73,7 +75,7 @@ PLANS: Mapping[str, list[str]] = {
 }
 
 
-def run_subagents(goal: str, *, min_confidence: float = MIN_CONFIDENCE) -> dict:
+def run_subagents(goal: str, *, min_probability: float = MIN_PROBABILITY) -> dict:
     """Choose the smallest sufficient worker plan and run it."""
     state = {"goal": goal, "available_workers": sorted(WORKERS)}
     result = decide(state, {
@@ -89,7 +91,7 @@ def run_subagents(goal: str, *, min_confidence: float = MIN_CONFIDENCE) -> dict:
     answer = result.answers["plan"]
     # Fail closed toward doing less: an uncertain plan means no parallel work
     # rather than speculative fan-out whose results may not be used.
-    plan = str(answer.value) if answer.certainty >= min_confidence else "solo"
+    plan = str(answer.value) if answer.chosen_probability >= min_probability else "solo"
     if plan not in PLANS:
         plan = "solo"
 

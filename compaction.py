@@ -77,7 +77,12 @@ def _question(chunk_id: str) -> Choice:
     )
 
 
-def compact(goal: str, chunks: Sequence[HistoryChunk], *, min_confidence: float = 0.70) -> dict:
+# The chosen level's probability; 0.80 is what the former 0.70 confidence bar
+# meant among full / index / drop, so behaviour is unchanged.
+MIN_PROBABILITY = 0.80
+
+
+def compact(goal: str, chunks: Sequence[HistoryChunk], *, min_probability: float = MIN_PROBABILITY) -> dict:
     """
     Re-represent `chunks` for `goal`.
 
@@ -128,7 +133,7 @@ def compact(goal: str, chunks: Sequence[HistoryChunk], *, min_confidence: float 
 
     for c in scored:
         answer = result.answers.get(c.id)
-        level = str(answer.value) if answer and answer.certainty >= min_confidence else "full"
+        level = str(answer.value) if answer and answer.chosen_probability >= min_probability else "full"
         # Small chunks are never indexed: an excerpt of a short output costs
         # about what the output costs and is strictly less useful.
         if level == "index" and len(c.text) < MIN_INDEX_CHARS:

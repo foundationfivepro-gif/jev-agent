@@ -525,9 +525,10 @@ def jev_route_model(
     Cheapest model that should pass a subtask. The Agent hook already does this
     for every spawn without an explicit model; call it only where no hook runs.
 
-    Pass `selected` as the model. Below 75% confidence it returns the strongest
-    tier Jev gave 20% weight (mechanical tasks: cheap tier accepted from 50%).
-    Fable is escalation-only, never a fallback. `human` means do not delegate.
+    Pass `selected` as the model. When the chosen model's probability is under 80% it returns the
+    strongest tier Jev gave 20% weight (mechanical tasks: cheap tier accepted from 60%).
+    Fable is escalation-only, never a fallback. `human` means do not delegate; it is
+    returned whenever it is Jev's top answer, even under the bar.
     """
     _require_key()
     if not task.strip():

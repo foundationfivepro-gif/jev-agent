@@ -18,7 +18,10 @@ from typing import Any, Mapping, Sequence
 
 from core import Choice, decide, write_trace
 
-MIN_CONFIDENCE = 0.80
+# On the chosen tool's probability, not confidence: the live tool list changes
+# size, and a confidence bar would mean something different for each size.
+# 0.85 is what the former 0.80 confidence bar demanded among 3-5 options.
+MIN_PROBABILITY = 0.85
 
 
 def route_tool(
@@ -26,7 +29,7 @@ def route_tool(
     catalog: Mapping[str, Mapping[str, Any]],
     *,
     allowed_scopes: Sequence[str] | None = None,
-    min_confidence: float = MIN_CONFIDENCE,
+    min_probability: float = MIN_PROBABILITY,
 ) -> dict:
     """
     Pick at most one tool for `goal`.
@@ -56,7 +59,7 @@ def route_tool(
         "tool": Choice(instructions="Which single tool should run next?", criteria=criteria)
     })
     answer = result.answers["tool"]
-    selected = str(answer.value) if answer.certainty >= min_confidence else "none"
+    selected = str(answer.value) if answer.chosen_probability >= min_probability else "none"
 
     # Never trust a name back from the model without checking it against the
     # live catalog — a hallucinated id must not reach the executor.
@@ -67,6 +70,7 @@ def route_tool(
         "selected": selected,
         "proposed": answer.value,
         "confidence": answer.certainty,
+        "probability": answer.chosen_probability,
         "schema": live.get(selected, {}).get("schema"),
         "probabilities": answer.probabilities,
         "source": "model",

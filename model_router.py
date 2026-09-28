@@ -26,13 +26,17 @@ from typing import Mapping
 
 from core import UNTRUSTED, Choice, Score, decide, write_trace
 
-MIN_CONFIDENCE = 0.75
+# Bars are on the chosen model's probability (core.Answer.chosen_probability),
+# not Jev's confidence, whose meaning shifts with the menu size (JEV_MODELS,
+# max_cost_in). These equal the former confidence bars of 0.75 and 0.5 on the
+# full five-option menu (four models + human), so full-menu routes are unchanged.
+MIN_PROBABILITY = 0.80
 
 # Below this complexity a task is mechanical, and a cheap-tier proposal is
 # accepted at the lower bar: a Haiku retry on a one-line edit costs almost
 # nothing, so failing toward capability there only spends Opus for no reason.
 MECHANICAL_COMPLEXITY = 0.5
-MECHANICAL_CONFIDENCE = 0.5
+MECHANICAL_PROBABILITY = 0.60
 
 # An uncertain route falls back to the strongest tier Jev gave real weight to,
 # not blindly to the top: a sonnet-vs-haiku split never needed Opus. Weight on a
@@ -129,7 +133,7 @@ def route_model(
     catalog: Mapping[str, Mapping] = DEFAULT_CATALOG,
     needs_browser: bool = False,
     max_cost_in: float = 1e9,
-    min_confidence: float = MIN_CONFIDENCE,
+    min_probability: float = MIN_PROBABILITY,
     trace_meta: Mapping[str, str] | None = None,
 ) -> dict:
     """
@@ -150,7 +154,9 @@ def route_model(
         return decision
 
     criteria = {k: v["fit"] for k, v in eligible.items()}
-    criteria["human"] = "None of these should attempt this unaided"
+    criteria["human"] = ("A person must decide or do this: a personnel, legal, financial or ethical "
+                         "judgment, or a commitment made on someone's behalf. Also when no model "
+                         "should attempt it unaided")
 
     state = {
         "task": task,
@@ -176,16 +182,23 @@ def route_model(
     proposed = str(answer.value)
     complexity = result.value("complexity")
 
-    threshold = min_confidence
+    threshold = min_probability
     if (
         complexity is not None and float(complexity) < MECHANICAL_COMPLEXITY
         and proposed in ordinary
     ):
-        threshold = min(min_confidence, MECHANICAL_CONFIDENCE)
+        threshold = min(min_probability, MECHANICAL_PROBABILITY)
 
     fallback = None
-    if answer.certainty >= threshold:
+    probability = answer.chosen_probability
+    if probability >= threshold:
         selected = proposed
+    elif proposed == "human":
+        # Jev's single most likely answer is that a person owns this (fire a
+        # vendor, approve a refund). Under the bar that is still the best read;
+        # upgrading to Opus would pay the most to delegate the one thing that
+        # should not be delegated.
+        selected, fallback = "human", "low_confidence_human"
     else:
         selected = _fallback(answer.probabilities, ordinary, strongest)
         fallback = "low_confidence"
@@ -196,6 +209,7 @@ def route_model(
         "selected": selected,
         "proposed": answer.value,
         "confidence": answer.certainty,
+        "probability": probability,
         "threshold": threshold,
         "complexity": complexity,
         "probabilities": answer.probabilities,

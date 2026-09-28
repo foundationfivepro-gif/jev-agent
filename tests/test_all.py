@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import canary
 from canary import CanaryError, check_separation
-from core import Noul, active_transport, decide
+from core import Noul, active_transport, decide, probability_bar
 from context_tier import Chunk, select
 from permission_gate import extract_commands, hard_block_reason
 from security_router import LABEL_NAMES, SECRET, classify
@@ -418,6 +418,7 @@ def test_route_model_uncertain_route_never_escalates_to_fable(monkeypatch):
     class Answer:
         def __init__(self, value, certainty):
             self.value, self.certainty, self.probabilities = value, certainty, {}
+            self.chosen_probability = probability_bar(certainty, 5)   # confidence -> probability, full menu
 
     class Result:
         def __init__(self, value, certainty):
@@ -448,6 +449,7 @@ def test_route_model_mechanical_tasks_accept_cheap_tier_at_lower_bar(monkeypatch
     class Answer:
         def __init__(self, value, certainty):
             self.value, self.certainty, self.probabilities = value, certainty, {}
+            self.chosen_probability = probability_bar(certainty, 5)   # confidence -> probability, full menu
 
     class Result:
         def __init__(self, value, certainty, complexity):
@@ -463,13 +465,13 @@ def test_route_model_mechanical_tasks_accept_cheap_tier_at_lower_bar(monkeypatch
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 0.2))
     assert route("x")["selected"] == "haiku"           # mechanical: 0.55 is enough
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 1.0))
-    assert route("x")["selected"] == "opus"            # standard: 0.75 still applies
+    assert route("x")["selected"] == "opus"            # standard: the 0.80 bar still applies
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.4, 0.2))
     assert route("x")["selected"] == "opus"            # mechanical but a coin flip
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.55, 0.2))
     assert route("x")["selected"] == "opus"            # the lower bar never reaches Fable
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("human", 0.55, 0.2))
-    assert route("x")["selected"] == "opus"            # nor does it accept 'human' cheaply
+    assert route("x")["selected"] == "human"           # human as the top answer is never upgraded to Opus
 
 
 def test_route_model_uncertain_fallback_stops_at_strongest_tier_considered(monkeypatch):
@@ -479,6 +481,7 @@ def test_route_model_uncertain_fallback_stops_at_strongest_tier_considered(monke
     class Answer:
         def __init__(self, value, certainty, probabilities):
             self.value, self.certainty, self.probabilities = value, certainty, probabilities
+            self.chosen_probability = probability_bar(certainty, 5)   # confidence -> probability, full menu
 
     class Result:
         def __init__(self, value, certainty, probabilities):
@@ -848,6 +851,7 @@ def test_route_model_names_its_fallback_and_carries_join_keys(monkeypatch):
     class Answer:
         def __init__(self, value, certainty):
             self.value, self.certainty, self.probabilities = value, certainty, {}
+            self.chosen_probability = probability_bar(certainty, 5)   # confidence -> probability, full menu
 
     class Result:
         latency_ms, input_tokens, output_tokens = 120, 300, 20

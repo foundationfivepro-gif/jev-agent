@@ -170,6 +170,28 @@ class Answer:
             return abs(float(self.value) - 0.5) * 2
         return float(self.confidence or 0.0)
 
+    @property
+    def chosen_probability(self) -> float:
+        """
+        Probability of the chosen option: what a Choice gate should compare.
+
+        Choice `confidence` is about (n * peak - 1) / (n - 1) for n options
+        (docs.typesafe.ai/confidence), so one confidence bar demands a different
+        probability whenever the menu changes size: 0.75 means 0.80 among five
+        options and 0.83 among three. The chosen option's probability means the
+        same at any size. Falls back to certainty when there is no distribution.
+        """
+        if self.kind == "choice" and self.probabilities:
+            p = self.probabilities.get(self.value, self.probabilities.get(str(self.value)))
+            if p is not None:
+                return float(p)
+        return self.certainty
+
+
+def probability_bar(confidence: float, options: int) -> float:
+    """The chosen-option probability a confidence bar demanded among `options` options."""
+    return (confidence * (options - 1) + 1) / options
+
 
 @dataclass(frozen=True)
 class Decision:

@@ -48,10 +48,10 @@ compression. One whose transcript the parent re-reads has thrown the advantage a
 
 Once the compression check says delegate, `jev_route_model(task=...)` picks the cheapest
 Claude model that should pass and returns `selected` — pass it verbatim as the Agent tool's
-`model` parameter. It already applies rule 5: below 0.75 confidence it returns the strongest
+`model` parameter. It already applies rule 5: when its pick's probability is under 0.80 it returns the strongest
 ordinary tier it gave at least 20% weight to — so a sonnet/haiku split stays on Sonnet, while any
-weight on Opus, Fable or `human` means Opus — except on a mechanical task (complexity under 0.5), where a cheap
-tier is accepted from 0.5, because a Haiku retry on a one-line edit is nearly free. `human`
+weight on Opus, Fable or `human` means Opus (unless `human` is its top answer: then `human`) — except on a mechanical task (complexity under 0.5), where a cheap
+tier is accepted from 0.60, because a Haiku retry on a one-line edit is nearly free. `human`
 means do not delegate.
 
 In Claude Code this also runs as a `PreToolUse` hook on the Agent tool (`hooks.py
