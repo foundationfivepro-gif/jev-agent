@@ -1,6 +1,6 @@
 ---
 name: jev-evaluation
-description: Call TypeSafe AI's Jev evaluation model (typesafe-ai/jev) for structured decisions — routing, classification, rubric scoring, relevance filtering, verification. Use when writing or debugging code that calls Jev, or choosing whether a decision belongs to Jev rather than a chat model.
+description: Write or debug code that calls Jev (TypeSafe's jev-latest) through this repo's core.decide — Noul, Choice and Score questions, thresholds, batching, response validation. Use when code asks Jev for a routing, classification, scoring, relevance or verification decision. For brainstorming what TypeSafe could add to a product, use typesafe-ai.
 ---
 
 # Jev — structured evaluation

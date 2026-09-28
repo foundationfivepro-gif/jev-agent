@@ -1,6 +1,6 @@
 ---
 name: cheap-evaluator-gate
-description: Put a cheap evaluation model in front of expensive work — relevance-scoring before reading, verifying a compression kept key facts, routing among many tools, gating risky actions. Use when about to fan out file reads, compact context, or pick from a large option set.
+description: Decide whether putting a cheap evaluator in front of expensive work pays off, and how to gate it — thresholds, batching, gating on the bad outcome's probability, verifying a compression kept key facts, gating risky actions. Use when designing a gate or checking what one costs. For choosing which files or chunks enter context, use context-tiering.
 ---
 
 # Gating expensive work behind a cheap evaluator

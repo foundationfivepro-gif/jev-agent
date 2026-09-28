@@ -1,6 +1,6 @@
 ---
 name: context-tiering
-description: Decide per chunk whether to include, index, or exclude it from an agent's context window. Use when building dynamic context selection, retrieval, or compaction for a coding agent — the single largest token saving available.
+description: Decide per file or chunk whether to include, index, or exclude it from an agent's context window, scoring relevance before anything is read. Use when building dynamic context selection, retrieval, or compaction for a coding agent — the single largest token saving available.
 ---
 
 # Include, index, or exclude — not summarize
