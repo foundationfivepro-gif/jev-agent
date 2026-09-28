@@ -10,7 +10,7 @@
 #               policy (CLAUDE.md) in ~/.claude/CLAUDE.md; the two go together.
 #
 #   MCP server  The decision tools, chiefly jev_select_context, which runs
-#               before Claude reads files. Needs TYPESAFE_API_KEY.
+#               before Claude reads files. Needs OPENROUTER_API_KEY (or TYPESAFE_API_KEY).
 #
 # Usage:
 #   ./install.sh skills | hooks | mcp | all
@@ -40,12 +40,13 @@ print_mcp() {
       $py -m pip install -r "$HERE/requirements.txt"
 
   Claude Code (desktop + CLI):
-      claude mcp add jev \\
-        --env TYPESAFE_API_KEY=\$TYPESAFE_API_KEY \\
-        -- $py "$HERE/mcp_server.py"
+      claude mcp add jev --scope user -- $py "$HERE/mcp_server.py"
+
+  The key comes from $HERE/.env (OPENROUTER_API_KEY; TYPESAFE_API_KEY or
+  AI_GATEWAY_API_KEY as fallbacks), which the server reads at start.
 
   Verify:
-      TYPESAFE_API_KEY=... $py "$HERE/mcp_server.py"   # should sit waiting on stdio
+      $py "$HERE/mcp_server.py"   # should sit waiting on stdio
 
   The server is read-only: it decides, it never edits files or runs commands.
 EOF

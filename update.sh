@@ -78,9 +78,9 @@ EOF
 echo "   wrote ~/.claude/skills/jev-update — type /jev-update in Claude Code next time"
 
 say "5/6 MCP server"
-# TypeSafe's own key first; the Vercel gateway key is the legacy fallback.
+# Same order as core.TRANSPORTS: OpenRouter, TypeSafe, then the legacy gateway.
 KEY=""; KEY_VAR=""
-for var in TYPESAFE_API_KEY AI_GATEWAY_API_KEY; do
+for var in OPENROUTER_API_KEY TYPESAFE_API_KEY AI_GATEWAY_API_KEY; do
   val="${!var:-}"
   if [ -z "$val" ] && [ -f "$HERE/.env" ]; then
     val="$(sed -n "s/^[[:space:]]*$var[[:space:]]*=[[:space:]]*//p" "$HERE/.env" | head -n1 | tr -d "\"'")"
@@ -92,7 +92,7 @@ if ! command -v claude >/dev/null 2>&1; then
 elif claude mcp get jev >/dev/null 2>&1; then
   echo "   jev already registered (to switch keys: claude mcp remove jev --scope user, then re-run)"
 elif [ -z "$KEY" ]; then
-  echo "   no TYPESAFE_API_KEY in $HERE/.env; skipped. Add it and re-run."
+  echo "   no OPENROUTER_API_KEY (or TYPESAFE_API_KEY) in $HERE/.env; skipped. Add it and re-run."
 else
   claude mcp add jev --scope user --env "$KEY_VAR=$KEY" -- "$PY" "$HERE/mcp_server.py" >/dev/null
   echo "   registered jev (user scope, $KEY_VAR)"

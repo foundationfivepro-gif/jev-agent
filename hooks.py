@@ -97,15 +97,9 @@ RETURN_CONTRACT = (
 
 
 def _load_env() -> None:
-    path = Path(os.environ.get("JEV_ENV_FILE") or HERE / ".env")
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+    from core import load_env
+
+    load_env()
 
 
 def _have_key() -> bool:

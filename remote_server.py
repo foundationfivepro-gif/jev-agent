@@ -47,7 +47,7 @@ The path form puts a credential in a URL, which ends up in logs and history.
 Prefer the header. If you use the path form, treat the token as disposable and
 rotate it freely — it grants only these seven tools.
 
-Run locally:   JEV_REMOTE_TOKEN=x TYPESAFE_API_KEY=... python remote_server.py
+Run locally:   JEV_REMOTE_TOKEN=x OPENROUTER_API_KEY=... python remote_server.py
 Deploy:        see vercel.json and api/index.py
 """
 
@@ -98,7 +98,7 @@ mcp = MCPServer(
 def _require_key() -> None:
     if not active_transport():
         raise ValueError(
-            "The server is missing TYPESAFE_API_KEY. This is a server-side "
+            "The server is missing OPENROUTER_API_KEY (or TYPESAFE_API_KEY). This is a server-side "
             "configuration problem, not something you can fix from the client."
         )
 
@@ -472,7 +472,7 @@ class PathToken(BaseHTTPMiddleware):
 
 
 async def health(_: Request) -> PlainTextResponse:
-    ready = "ok" if active_transport() else "missing TYPESAFE_API_KEY"
+    ready = "ok" if active_transport() else "missing OPENROUTER_API_KEY / TYPESAFE_API_KEY"
     auth = "token set" if TOKEN else "NO TOKEN — server will refuse requests"
     return PlainTextResponse(f"jev-remote: {ready}; auth: {auth}\n")
 

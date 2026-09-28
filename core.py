@@ -5,14 +5,18 @@ Jev is the ONLY external model in this system. Nothing here calls a generative
 model; every other step is deterministic code. That is a design constraint, not
 an accident — see context_tier.py for why it also produces a better result.
 
-Transport is TypeSafe's own API, chosen by which key is set:
+Transport is chosen by which key is set, first match wins:
 
-    TYPESAFE_API_KEY   -> api.typesafe.ai/v1/systemone, model jev-latest   (preferred)
+    OPENROUTER_API_KEY -> openrouter.ai/api/v1/systemone, model jev-latest (default)
+    TYPESAFE_API_KEY   -> api.typesafe.ai/v1/systemone, model jev-latest
     AI_GATEWAY_API_KEY -> ai-gateway.vercel.sh/v1/evaluate, model typesafe-ai/jev
 
-The Vercel AI Gateway stays only as a fallback for installs that still hold
-just a gateway key. Both keys set means TypeSafe; the gateway is never tried
-after a TypeSafe failure, because a silent second route would hide the first
+OpenRouter serves TypeSafe's own System One API unchanged: same path, same
+request and response shapes, billed to the OpenRouter account. It is what the
+TypeSafe SDK reaches with base_url=https://openrouter.ai/api
+(openrouter.ai/docs/guides/community/typesafe-sdk), so it shares the TypeSafe
+dialect here. The Vercel AI Gateway stays only as a fallback for installs that
+still hold just a gateway key. No transport is ever tried after another fails, because a silent second route would hide the first
 one breaking. The two dialects differ only on the wire: the gateway calls the
 yes/no primitive `boolean` and answers it with `probability`, TypeSafe calls it
 `noul` both ways; usage keys are camelCase on one and snake_case on the other.
@@ -44,13 +48,16 @@ from typesafe_sdk import Choice, Noul, RetryPolicy, Score
 
 __all__ = [
     "Choice", "Noul", "Score",          # re-exported so modules import one place
-    "decide", "decide_batched", "write_trace",
+    "decide", "decide_batched", "write_trace", "load_env",
     "Decision", "TransportError", "InvalidResponse", "active_transport", "MAX_QUESTIONS",
     "UNTRUSTED", "DEADLINE_S", "unreachable",
 ]
 
 # ---------------------------------------------------------------- configuration
 
+OPENROUTER_URL = os.getenv("JEV_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+# A bare TypeSafe id; OpenRouter routes jev-latest as ~typesafe/jev-latest.
+OPENROUTER_MODEL = os.getenv("JEV_OPENROUTER_MODEL", "jev-latest")
 TYPESAFE_URL = os.getenv("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1")
 TYPESAFE_MODEL = os.getenv("JEV_MODEL", "jev-latest")
 GATEWAY_URL = os.getenv("AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
@@ -58,10 +65,40 @@ GATEWAY_MODEL = os.getenv("JEV_GATEWAY_MODEL", "typesafe-ai/jev")
 
 # transport -> (key variable, endpoint, model, yes/no type name on the wire)
 TRANSPORTS = {
+    "openrouter": ("OPENROUTER_API_KEY", f"{OPENROUTER_URL}/systemone", OPENROUTER_MODEL, "noul"),
     "typesafe": ("TYPESAFE_API_KEY", f"{TYPESAFE_URL}/systemone", TYPESAFE_MODEL, "noul"),
     "gateway": ("AI_GATEWAY_API_KEY", f"{GATEWAY_URL}/evaluate", GATEWAY_MODEL, "boolean"),
 }
-NO_KEY = "No Jev key is set: add TYPESAFE_API_KEY (or the legacy AI_GATEWAY_API_KEY)."
+NO_KEY = ("No Jev key is set: add OPENROUTER_API_KEY (or TYPESAFE_API_KEY, or the legacy "
+          "AI_GATEWAY_API_KEY) to the jev-agent .env.")
+
+# OpenRouter's validator requires `instructions` on a noul; TypeSafe and the
+# gateway accept criteria alone. Saying only "judge by the criteria" keeps the
+# wording callers tuned as the whole question.
+NOUL_BY_CRITERIA = "Answer true or false by the criteria given."
+
+ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+
+def load_env(path: str | os.PathLike | None = None) -> None:
+    """
+    Fill unset variables from this repository's .env (or JEV_ENV_FILE).
+
+    Hooks and the MCP server are launched with Claude's environment, not a login
+    shell's, so the key lives in one file both read. A variable already set wins:
+    an explicit `--env` or a cloud secret is never replaced. Transport settings
+    above are read at import, so call this before importing core's callers when
+    a .env sets them.
+    """
+    env = Path(path or os.environ.get("JEV_ENV_FILE") or ENV_FILE)
+    if not env.is_file():
+        return
+    for line in env.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 # Measured against this exact transport, so these are production numbers, not
 # estimates: ~150 questions succeed in isolation, 170+ returns a 503 that
@@ -139,7 +176,7 @@ PROBABILITY_SUM_TOLERANCE = 0.02
 
 
 def active_transport() -> str:
-    """'typesafe', 'gateway', or '' when neither key is set. TypeSafe wins when both are."""
+    """'openrouter', 'typesafe', 'gateway', or '' when no key is set. First in TRANSPORTS wins."""
     for name, (key, *_rest) in TRANSPORTS.items():
         if os.getenv(key):
             return name
@@ -292,6 +329,10 @@ def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
     key_var, url, model, noul_type = TRANSPORTS[transport]
     key = os.environ[key_var]
     wire = _questions_to_wire(questions, noul_type)
+    if transport == "openrouter":
+        for q in wire.values():
+            if q["type"] == "noul" and "instructions" not in q:
+                q["instructions"] = NOUL_BY_CRITERIA
     payload = json.dumps({"model": model, "state": state, "questions": wire}).encode()
     started = time.monotonic()
     answered = False
