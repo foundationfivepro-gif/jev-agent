@@ -193,7 +193,9 @@ def route_model(
         selected = proposed
     else:
         selected = _fallback(answer.probabilities, ordinary, strongest)
-        fallback = "low_confidence"
+        # A fallback that lands on the proposed model changed nothing: it is not
+        # an escalation, so it must not be reported as one.
+        fallback = None if selected == proposed else "low_confidence"
     if selected not in eligible and selected != "human":
         selected, fallback = strongest, "not_eligible"
 

@@ -869,6 +869,16 @@ def test_route_model_names_its_fallback_and_carries_join_keys(monkeypatch):
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.3))
     assert model_router.route_model("x")["fallback"] == "low_confidence"
 
+    # Uncertain, but the fallback lands on the model Jev proposed: not an escalation.
+    def sonnet(s, q):
+        r = Result("sonnet", 0.7)
+        r.answers["model"].probabilities = {"sonnet": 0.7, "haiku": 0.3}
+        return r
+
+    monkeypatch.setattr(model_router, "decide", sonnet)
+    d = model_router.route_model("x")
+    assert d["selected"] == "sonnet" and d["fallback"] is None
+
 
 def test_agent_outcome_is_recorded_and_joined_to_its_route(tmp_path, monkeypatch):
     import core
