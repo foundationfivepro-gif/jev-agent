@@ -360,10 +360,14 @@ def report(trace_dir: Path | None = None) -> dict:
     by_model: dict[str, Counter] = {}
     tokens_by_model: Counter = Counter()
     fallbacks: Counter = Counter()
-    jev_input = 0
+    jev_input = 0            # tokens on calls the transport did not price
+    jev_billed = 0.0         # USD on calls it did (OpenRouter's usage.cost)
     for key, d in routes.items():
         fallbacks[d.get("fallback") or "accepted"] += 1
-        jev_input += int(d.get("input_tokens") or 0)
+        if d.get("cost_usd") is not None:
+            jev_billed += float(d["cost_usd"])
+        else:
+            jev_input += int(d.get("input_tokens") or 0)
         model = str(d.get("selected"))
         outcome = outcomes.get(key) or {}
         by_model.setdefault(model, Counter())[outcome.get("status", "no_outcome")] += 1
@@ -380,7 +384,13 @@ def report(trace_dir: Path | None = None) -> dict:
                 "tokens_per_ok": spent // ok,
                 "usd_per_ok_at_input_rate": round(spent / ok * rate / 1e6, 4) if rate else None,
             }
+    # OpenRouter prices each call in its response; the other transports do not,
+    # so those calls are estimated at the list rate. The source says which.
     jev_rate = float(os.environ.get("JEV_PRICE_PER_MTOK", "0.042"))
+    estimated = jev_input * jev_rate / 1e6
+    cost_source = ("billed" if jev_billed and not jev_input else
+                   "estimated" if jev_input and not jev_billed else
+                   "mixed" if jev_input or jev_billed else "none")
     explicit = sum(1 for k in outcomes if k not in routes)
     latencies = sorted(d["latency_ms"] for d in routes.values() if d.get("latency_ms") is not None)
     return {
@@ -388,7 +398,8 @@ def report(trace_dir: Path | None = None) -> dict:
         "fallbacks": dict(fallbacks),
         "outcomes_by_selected_model": {m: dict(c) for m, c in sorted(by_model.items())},
         "cost_per_completed_subagent": dict(sorted(cost_per_ok.items())),
-        "jev_routing_cost_usd": round(jev_input * jev_rate / 1e6, 6),
+        "jev_routing_cost_usd": round(jev_billed + estimated, 6),
+        "jev_routing_cost_source": cost_source,
         "subagents_not_routed_by_jev": explicit,
         "decisions_without_tool_use_id": unjoined,
         "median_latency_ms": latencies[len(latencies) // 2] if latencies else None,
@@ -420,12 +431,12 @@ def prompt(data: dict) -> None:
     try:
         r = decide({"prompt": text[:MAX_TASK_CHARS]}, {
             "complexity": Score(
-                instructions="Complexity of completing state.prompt as a coding task" + UNTRUSTED,
+                instructions="Complexity of completing the task in `prompt` as a coding task" + UNTRUSTED,
                 criteria=list(COMPLEXITY),
             ),
             "repo": Noul(
-                instructions="Completing state.prompt requires locating or reading code "
-                             "in a repository",
+                instructions="Completing the task in `prompt` requires locating or reading "
+                             "code in a repository",
             ),
         })
     except TransportError:

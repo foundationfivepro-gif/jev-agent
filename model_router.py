@@ -204,6 +204,7 @@ def route_model(
         "latency_ms": getattr(result, "latency_ms", None),
         "input_tokens": getattr(result, "input_tokens", None),
         "output_tokens": getattr(result, "output_tokens", None),
+        "cost_usd": getattr(result, "cost_usd", None),      # billed, when the transport says
     }
     write_trace("model_router", state, decision, meta=trace_meta)
     return decision

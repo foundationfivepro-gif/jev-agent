@@ -99,7 +99,7 @@ def _question(chunk_id: str) -> Noul:
     """
     return Noul(
         instructions=(
-            f"Consider ONLY the chunk whose id is '{chunk_id}' in state.chunks, "
+            f"Consider ONLY the chunk whose id is '{chunk_id}' in `chunks`, "
             f"ignoring every other chunk. Could that chunk materially change the "
             f"answer to the stated goal?"
         )

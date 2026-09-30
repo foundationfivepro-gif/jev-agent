@@ -66,7 +66,7 @@ def _question(chunk_id: str) -> Choice:
     """Scoped to one chunk by name — see context_tier._question for why."""
     return Choice(
         instructions=(
-            f"Consider ONLY the chunk whose id is '{chunk_id}' in state.chunks, "
+            f"Consider ONLY the chunk whose id is '{chunk_id}' in `chunks`, "
             f"ignoring every other chunk. How should it appear in the next context?"
         ),
         criteria={

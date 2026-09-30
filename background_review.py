@@ -93,7 +93,7 @@ REVIEWERS: Mapping[str, Callable[[], dict]] = {
 def _question(name: str) -> Noul:
     return Noul(
         instructions=(
-            f"Consider ONLY the reviewer named '{name}' in state.reviewers, "
+            f"Consider ONLY the reviewer named '{name}' in `reviewers`, "
             f"ignoring every other reviewer. Is it worth running for this change?"
         )
     )

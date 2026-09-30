@@ -57,7 +57,7 @@ def _question(rule_id: str) -> Noul:
     """Scoped to one rule by name — see context_tier._question."""
     return Noul(
         instructions=(
-            f"Consider ONLY the rule whose id is '{rule_id}' in state.rules, "
+            f"Consider ONLY the rule whose id is '{rule_id}' in `rules`, "
             f"ignoring every other rule. Must that rule constrain how this task "
             f"is carried out?"
         )

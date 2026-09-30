@@ -12,8 +12,26 @@ only when no OpenRouter key is set — see "Transport" below.
 pip install -r requirements.txt
 cp .env.example .env      # set OPENROUTER_API_KEY
 python -m pytest tests/ -q
-./install.sh all          # skills + hooks + policy + MCP registration for Claude Code
+./install.sh all          # skills + TypeSafe plugin + hooks + policy + MCP registration
 ```
+
+## TypeSafe's official skill and this repo
+
+TypeSafe publishes an agent skill, `typesafe-ai` ([typesafe-ai/skills](https://github.com/typesafe-ai/skills)),
+and this repo uses it rather than duplicating it. The split:
+
+| | `typesafe-ai` (TypeSafe's plugin) | `jev-*` skills here |
+|---|---|---|
+| answers | how to design a judgment: which primitive, what goes in state vs instructions vs criteria, confidence, cookbooks | how *this* runtime calls Jev: transport, `core.decide`, batching ceilings, thresholds, the MCP tools and hooks |
+| source of truth | docs.typesafe.ai, read live (`llms.txt` index) | measured numbers in this README and the tests |
+| installed by | `.claude/settings.json` for this project; `./install.sh plugin` at user scope | `./install.sh skills` |
+
+`.claude/settings.json` declares the `typesafe-ai` marketplace and enables `typesafe@typesafe-ai`,
+so a clone of this repo has it; `install.sh plugin` (part of `all` and of `update.sh`) installs
+and updates it at user scope so every other project has it too. `/typesafe:typesafe-ai` loads it
+by hand. The `jev-evaluation` skill points at it whenever Jev code is being written, and the
+question wording in this repo follows its guidance (backticked state paths such as `` `chunks` ``,
+instructions carrying the whole meaning because ids are never sent to the model).
 
 ## Install or update on a computer
 
@@ -133,6 +151,12 @@ point at `scripts/cloud.sh`, which acts only when `CLAUDE_CODE_REMOTE=true`: it 
 user-scope install does locally. On your own machine it exits immediately, and your
 local-scope `jev` server outranks the project one, so nothing runs twice.
 
+The cloud image ships Debian-owned Python packages that pip cannot uninstall, so a
+system-wide `pip install` of `mcp[cli]` fails on PyJWT and, before this was handled, the
+`jev` server never started. `cloud.sh` now falls back to a git-ignored `.venv` in the
+repo (about 20 seconds, once per VM, inside the SessionStart hook's budget) and runs
+every later hook and the server from it.
+
 The VM has no `.env`, and the default **Trusted** network does not reach
 `openrouter.ai`. Edit the cloud environment at claude.ai/code:
 
@@ -228,9 +252,27 @@ serving an open endpoint that spends your Jev quota.
 
 OpenRouter serves TypeSafe's System One API with the same request and response shapes;
 it is exactly what the TypeSafe SDK calls with `base_url="https://openrouter.ai/api"`
-([guide](https://openrouter.ai/docs/guides/community/typesafe-sdk)). One difference:
-OpenRouter rejects a `noul` without `instructions`, so a criteria-only noul is sent
-with a neutral "answer by the criteria" line on that path only.
+([guide](https://openrouter.ai/docs/guides/community/typesafe-sdk)). Bare ids map into
+its `typesafe/` namespace (`jev-1.13` → `typesafe/jev-1.13`, `jev-latest` →
+`~typesafe/jev-latest`). Three things are specific to that path:
+
+- **Validation.** OpenRouter rejects a `noul` without `instructions`, so a criteria-only
+  noul is sent with a neutral "answer by the criteria" line on that path only.
+- **Billed cost.** Every OpenRouter response carries `usage.cost`, the USD actually
+  charged. `core.decide` keeps it as `Decision.cost_usd`, the model router writes it to
+  its trace, and `hooks.py report` sums it (`jev_routing_cost_usd`, with
+  `jev_routing_cost_source` saying whether the figure is billed, estimated at
+  `JEV_PRICE_PER_MTOK`, or mixed). TypeSafe's own API does not price the call.
+- **Attribution.** Requests carry `HTTP-Referer` and `X-OpenRouter-Title`
+  (`JEV_OPENROUTER_APP_URL`, `JEV_OPENROUTER_APP_TITLE`; defaults: this repo's URL,
+  `jev-agent`), so Jev's spend shows on its own at openrouter.ai/activity even though the
+  key is shared with other tooling. A `402` means that account is out of credits.
+
+**Pin the model once thresholds are tuned.** `jev-latest` follows TypeSafe's newest
+stable release. The thresholds in this repo (route confidence 0.75, skill probability
+0.60, context canary separation) were calibrated on jev-1.13; every trace records the
+`model` that answered, and `JEV_OPENROUTER_MODEL=jev-1.13` (or `JEV_MODEL` on the direct
+API) holds them still.
 
 The Vercel AI Gateway is kept only for installs that still hold just
 `AI_GATEWAY_API_KEY`. No transport is ever tried after another one fails,

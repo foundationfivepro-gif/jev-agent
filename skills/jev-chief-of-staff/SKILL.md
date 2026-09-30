@@ -39,11 +39,12 @@ takes the same body with `TYPESAFE_API_KEY`):
 POST https://openrouter.ai/api/v1/systemone       model: jev-latest
 ```
 
-The direct API is `typesafe-sdk` with model `jev-latest`, and OpenRouter uses
-`typesafe/jev-latest`. Model ids are not interchangeable between the three.
+Both take the bare id `jev-latest` (OpenRouter maps it to `~typesafe/jev-latest`; pin
+`jev-1.13` once your thresholds are tuned). Only the legacy Vercel gateway used
+`typesafe-ai/jev`; gateway ids do not work on the other two.
 
 ```json
-{"model": "typesafe-ai/jev",
+{"model": "jev-latest",
  "state": {
    "request": "Compare three AI-agent tools for tomorrow's briefing",
    "sources": [{"id": "s1", "title": "...", "summary": "..."}],
@@ -56,20 +57,21 @@ The direct API is `typesafe-sdk` with model `jev-latest`, and OpenRouter uses
        "write":    "Evidence is sufficient and no draft exists yet",
        "review":   "The request is unclear, or a complete draft exists"}},
    "urgency": {"type": "score", "criteria": ["can wait", "today", "now"]},
-   "needs_publishing": {"type": "boolean",
-     "instructions": "Does completing state.request require publishing or sending anything?"}}}
+   "needs_publishing": {"type": "noul",
+     "instructions": "Does completing `request` require publishing or sending anything?"}}}
 ```
 
 | type | returns | use for |
 |---|---|---|
 | `choice` | `choice`, `probabilities`, `confidence` | who goes next, which category (up to 255 options) |
 | `score` | `score` on your scale (fractions allowed), `probabilities`, `confidence` | relevance, readiness, urgency |
-| `boolean` (the SDK calls it `noul`) | `probability` of yes, 0 to 1 | approval checks, yes/no gates |
+| `noul` (the legacy gateway called it `boolean`) | `noul`, probability of yes, 0 to 1 | approval checks, yes/no gates |
 
 **The question id carries no meaning.** Jev never sees the id, so naming a question
 `safe_to_publish` tells it nothing. Put the requirement in `instructions` and describe
 every option in `criteria`. Every question is evaluated against the whole state. To ask
-about one item, name it: *"Consider ONLY source 's3' in state.sources"*.
+about one item, name its state path in backticks: *"Consider ONLY source 's3' in `sources`"*.
+For how to word and split questions, load the `typesafe-ai` skill and its live docs.
 
 **Give it evidence, not status.** "The researcher finished" tells Jev less than the
 sources, findings and remaining gaps. Keep the original request in its own field.
@@ -129,9 +131,11 @@ failure, not a success.
 ## 7. Measure the bill per completed task
 
 Jev costs about $0.042 per million input tokens, with no output charge. At about 1,000
-input tokens per decision, 10,000 decisions cost about $0.42. That's cheap enough that the
-decision's own price rarely matters. The price of a wrong decision does: a cheap call that
-sends a worker down the wrong branch costs that worker's whole run plus the retry. Track:
+input tokens per decision, 10,000 decisions cost about $0.42. On OpenRouter every response
+says what it was billed (`usage.cost`; `core.Decision.cost_usd`), so record that rather than
+estimating. That's cheap enough that the decision's own price rarely matters. The price of a
+wrong decision does: a cheap call that sends a worker down the wrong branch costs that
+worker's whole run plus the retry. Track:
 - cost per **completed** task, with failed and empty runs counted against the successes;
 - how often each route was taken and how it ended.
 
@@ -154,9 +158,10 @@ Then:
 | code | meaning |
 |---|---|
 | 401 | bad key |
-| 422 (direct) / 400 (gateway) | a request field is wrong; the error names it |
+| 402 (OpenRouter) | the OpenRouter account is out of credits; top up, do not retry |
+| 422 (direct) / 400 (OpenRouter, gateway) | a request field is wrong; the error names it |
 | 429 | rate limited; honour `Retry-After` (often 60s) |
-| 503 / 529 | overload; back off and retry later |
+| 502 / 503 / 529 | overload or provider down; back off and retry later |
 
 When Jev is unreachable, treat anything outbound as "ask a human", never as permission.
 Local work can continue.

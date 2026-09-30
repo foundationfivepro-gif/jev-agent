@@ -4,7 +4,8 @@
 #
 #   1. git pull (fast-forward only; local edits are never overwritten)
 #   2. Python requirements, only if the interpreter cannot import them
-#   3. skills, hooks and policy (./install.sh skills + hooks.py install)
+#   3. skills, hooks and policy (./install.sh skills + hooks.py install), and
+#      TypeSafe's official skill as a user-scope plugin (./install.sh plugin)
 #   4. /jev-update, so this runs from inside Claude Code next time
 #   5. the MCP server, registered at user scope if it is not registered yet
 #   6. a check that the hooks answer
@@ -57,8 +58,9 @@ else
    then re-run with: JEV_PYTHON=~/.jev-venv/bin/python $0"
 fi
 
-say "3/6 Skills, hooks and policy"
+say "3/6 Skills, plugin, hooks and policy"
 bash "$HERE/install.sh" skills | sed 's/^/   /'
+bash "$HERE/install.sh" plugin | sed 's/^/   /'
 "$PY" "$HERE/hooks.py" install | sed 's/^/   /'
 
 say "4/6 /jev-update command"

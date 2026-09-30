@@ -152,6 +152,43 @@ def test_openrouter_speaks_typesafe_dialect_at_its_documented_url(monkeypatch):
     assert body["model"] == "jev-latest" and body["questions"]["urgent"]["type"] == "noul"
     assert d.transport == "openrouter" and d.model == "typesafe/jev-1.13-20260917"
     assert d["urgent"] == 0.95 and d["team"] == "billing" and (d.input_tokens, d.output_tokens) == (318, 34)
+    # openrouter.ai/docs/guides/community/typesafe-sdk: the response adds usage.cost.
+    assert d.cost_usd == 0.00003
+
+
+def test_openrouter_requests_are_attributed_and_others_are_not(monkeypatch):
+    """openrouter.ai/docs/app-attribution: HTTP-Referer identifies the app, X-OpenRouter-Title names it."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    seen = _capture(monkeypatch, TYPESAFE_REPLY)
+    decide("x", QUESTIONS)
+    headers = seen[0][1]
+    assert headers["Http-referer"] == core.OPENROUTER_APP_URL == "https://github.com/foundationfivepro-gif/jev-agent"
+    assert headers["X-openrouter-title"] == core.OPENROUTER_APP_TITLE == "jev-agent"
+
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    seen = _capture(monkeypatch, TYPESAFE_REPLY)
+    d = decide("x", QUESTIONS)
+    assert not any(h.lower().startswith(("http-referer", "x-openrouter")) for h in seen[0][1])
+    assert d.cost_usd is None                     # TypeSafe's API does not price the call
+
+
+def test_batched_cost_is_summed_only_when_every_batch_is_priced(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    replies = iter([0.00002, 0.00003, None])
+
+    def urlopen(req, timeout):
+        body = json.loads(req.data)
+        cost = next(replies)
+        usage = {"input_tokens": 10, "output_tokens": 1, **({"cost": cost} if cost is not None else {})}
+        return _Resp(json.dumps({"model": "typesafe/jev-1.13", "usage": usage, "answers": {
+            q: {"type": "noul", "noul": 0.5} for q in body["questions"]}}).encode())
+
+    monkeypatch.setattr(core.urllib.request, "urlopen", urlopen)
+    qs = {f"q{i}": Noul(instructions=f"Question {i}?") for i in range(6)}
+    d = core.decide_batched("x", qs, size=2)
+    assert d.input_tokens == 30 and len(d.answers) == 6
+    assert d.cost_usd == pytest.approx(0.00005)    # unpriced batches add nothing, not None
 
 
 def test_openrouter_criteria_only_noul_gets_neutral_instructions(monkeypatch):

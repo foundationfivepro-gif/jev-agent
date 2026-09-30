@@ -755,6 +755,13 @@ def test_project_hooks_mirror_install_and_stay_cloud_only(tmp_path):
     mcp = json.loads(open(os.path.join(ROOT, ".mcp.json")).read())
     assert mcp["mcpServers"]["jev"]["args"][-1] == "mcp"
 
+    # The launcher runs from the repo .venv when system pip could not install
+    # (Debian-owned packages in the cloud image), else from python3.
+    src = open(os.path.join(ROOT, "scripts", "cloud.sh")).read()
+    assert 'VENV="$ROOT/.venv"' in src and 'python3 -m venv "$VENV"' in src
+    assert 'exec "$(py)" "$ROOT/hooks.py"' in src and 'exec "$(py)" "$ROOT/mcp_server.py"' in src
+    assert subprocess.run(["bash", "-n", os.path.join(ROOT, "scripts", "cloud.sh")]).returncode == 0
+
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_REMOTE"}
     r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud.sh"), "hook", "gate-bash"],
                        input='{"tool_input":{"command":"rm -rf /"}}', capture_output=True, text=True,
@@ -927,6 +934,15 @@ def test_report_counts_empty_results_and_cost_per_completed_subagent(tmp_path, m
     assert rep["cost_per_completed_subagent"]["sonnet"]["tokens_per_ok"] == 50_000
     assert rep["cost_per_completed_subagent"]["sonnet"]["usd_per_ok_at_input_rate"] == 0.1
     assert rep["jev_routing_cost_usd"] == round(3000 * 0.042 / 1e6, 6)
+    assert rep["jev_routing_cost_source"] == "estimated"
+
+    # A route answered over OpenRouter carries what it was billed; that replaces
+    # the estimate for that call, and the source says the total is now mixed.
+    core.write_trace("model_router", {"task": "d"}, {"selected": "haiku", "fallback": None,
+                     "input_tokens": 1000, "cost_usd": 0.00009}, meta={"tool_use_id": "d"})
+    rep = hooks.report(tmp_path)
+    assert rep["jev_routing_cost_usd"] == round(3000 * 0.042 / 1e6 + 0.00009, 6)
+    assert rep["jev_routing_cost_source"] == "mixed"
 
 
 def test_router_menu_is_what_the_account_has(monkeypatch):
@@ -945,6 +961,31 @@ def test_update_script_parses_and_restarts_after_pulling():
     assert subprocess.run(["bash", "-n", path]).returncode == 0
     src = open(path).read()
     assert 'exec bash "$HERE/update.sh"' in src and "--ff-only" in src
+    assert 'install.sh" plugin' in src           # TypeSafe's skill is kept current too
+
+
+def test_typesafe_plugin_is_enabled_for_the_project_and_installed_for_the_user():
+    """The official skill is the design half; it has to be present wherever the jev-* skills are."""
+    s = json.loads(open(os.path.join(ROOT, ".claude", "settings.json")).read())
+    assert s["enabledPlugins"] == {"typesafe@typesafe-ai": True}
+    assert s["extraKnownMarketplaces"]["typesafe-ai"]["source"]["repo"] == "typesafe-ai/skills"
+    install = open(os.path.join(ROOT, "install.sh")).read()
+    assert subprocess.run(["bash", "-n", os.path.join(ROOT, "install.sh")]).returncode == 0
+    assert "claude plugin marketplace add typesafe-ai/skills" in install
+    assert "claude plugin install typesafe@typesafe-ai" in install
+    # Without the CLI it says what to run instead of failing the whole install.
+    r = subprocess.run(["bash", os.path.join(ROOT, "install.sh"), "plugin"], capture_output=True,
+                       text=True, env={**os.environ, "PATH": "/usr/bin:/bin"}, timeout=30)
+    assert r.returncode == 0 and "claude plugin install typesafe@typesafe-ai" in r.stdout
+
+
+def test_question_wording_names_state_paths_the_typesafe_way():
+    """docs.typesafe.ai: reference state with backticked paths; ids are never sent to the model."""
+    for name, path in (("context_tier", "chunks"), ("compaction", "chunks"),
+                       ("conditional_agents", "rules"), ("background_review", "reviewers")):
+        mod = __import__(name)
+        text = mod._question("x1").instructions
+        assert f"in `{path}`" in text and "state." not in text, name
 
 
 # ------------------------------------------------------- when Jev goes quiet

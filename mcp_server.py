@@ -362,7 +362,7 @@ def jev_evaluate(
         "returns an interpolated value) or 'choice' (criteria = {option: description}). "
         "IMPORTANT: every question is judged against the WHOLE state, so a question "
         "about one part of it must say so explicitly in its instructions — e.g. "
-        "\"Consider ONLY state.files.f3\". Omitting that returns confident, uniform, "
+        "\"Consider ONLY `files.f3`\" (backticked state paths). Omitting that returns confident, uniform, "
         "wrong answers with no error."
     ))],
 ) -> Evaluation:

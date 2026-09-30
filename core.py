@@ -15,8 +15,10 @@ OpenRouter serves TypeSafe's own System One API unchanged: same path, same
 request and response shapes, billed to the OpenRouter account. It is what the
 TypeSafe SDK reaches with base_url=https://openrouter.ai/api
 (openrouter.ai/docs/guides/community/typesafe-sdk), so it shares the TypeSafe
-dialect here. The Vercel AI Gateway stays only as a fallback for installs that
-still hold just a gateway key. No transport is ever tried after another fails, because a silent second route would hide the first
+dialect here, and adds two things: `usage.cost`, the USD actually billed
+(kept as Decision.cost_usd), and app-attribution headers so Jev's spend is
+separable from the rest of the account. The Vercel AI Gateway stays only as a
+fallback for installs that still hold just a gateway key. No transport is ever tried after another fails, because a silent second route would hide the first
 one breaking. The two dialects differ only on the wire: the gateway calls the
 yes/no primitive `boolean` and answers it with `probability`, TypeSafe calls it
 `noul` both ways; usage keys are camelCase on one and snake_case on the other.
@@ -76,6 +78,14 @@ NO_KEY = ("No Jev key is set: add OPENROUTER_API_KEY (or TYPESAFE_API_KEY, or th
 # gateway accept criteria alone. Saying only "judge by the criteria" keeps the
 # wording callers tuned as the whole question.
 NOUL_BY_CRITERIA = "Answer true or false by the criteria given."
+
+# OpenRouter app attribution (openrouter.ai/docs/app-attribution). The key in
+# 1Password is shared with other Claude tooling, so without these headers Jev's
+# spend is indistinguishable from everything else on the account. With them,
+# openrouter.ai/activity and openrouter.ai/apps?url=<referer> show it on its
+# own. Sent on the OpenRouter transport only; TypeSafe and the gateway ignore them.
+OPENROUTER_APP_URL = os.getenv("JEV_OPENROUTER_APP_URL", "https://github.com/foundationfivepro-gif/jev-agent")
+OPENROUTER_APP_TITLE = os.getenv("JEV_OPENROUTER_APP_TITLE", "jev-agent")
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 
@@ -218,6 +228,10 @@ class Decision:
     input_tokens: int
     output_tokens: int
     latency_ms: int | None = None
+    # What the call was billed, in USD, when the transport says. OpenRouter
+    # returns `usage.cost` on every response; TypeSafe and the gateway do not,
+    # so callers estimate from input_tokens there and this stays None.
+    cost_usd: float | None = None
 
     def __getitem__(self, qid: str) -> Any:
         return self.answers[qid].value
@@ -342,11 +356,11 @@ def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
         remaining = DEADLINE_S - (time.monotonic() - started)
         if remaining <= 0:
             break
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        )
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        if transport == "openrouter":
+            headers["HTTP-Referer"] = OPENROUTER_APP_URL
+            headers["X-OpenRouter-Title"] = OPENROUTER_APP_TITLE
+        req = urllib.request.Request(url, data=payload, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=min(RETRY.timeout, remaining)) as resp:
                 body = json.loads(resp.read())
@@ -395,6 +409,7 @@ def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
         elif kind == "score":
             answers[qid] = Answer("score", a.get("score"), a.get("confidence"), a.get("probabilities"))
     usage = body.get("usage") or {}
+    cost = usage.get("cost")
     return Decision(
         answers=answers,
         model=body.get("model", model),
@@ -402,6 +417,7 @@ def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
         input_tokens=usage.get("input_tokens", usage.get("inputTokens", 0)),
         output_tokens=usage.get("output_tokens", usage.get("outputTokens", 0)),
         latency_ms=latency_ms,
+        cost_usd=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
     )
 
 
@@ -464,13 +480,16 @@ def decide_batched(
     merged: dict[str, Answer] = {}
     model = transport = ""
     tin = tout = 0
+    cost: float | None = None
     for group in _batches(ids, slice_state, questions, size):
         part = decide(slice_state(group), {qid: questions[qid] for qid in group})
         merged.update(part.answers)
         model, transport = part.model, part.transport
         tin += part.input_tokens
         tout += part.output_tokens
-    return Decision(merged, model, transport, tin, tout)
+        if part.cost_usd is not None:
+            cost = (cost or 0.0) + part.cost_usd
+    return Decision(merged, model, transport, tin, tout, cost_usd=cost)
 
 
 def _batches(
