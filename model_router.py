@@ -39,6 +39,12 @@ MECHANICAL_CONFIDENCE = 0.5
 # tier outside the ordinary set (escalation-only, or human) still means the
 # strongest ordinary tier — that mass is a signal the task is hard.
 MIN_FALLBACK_MASS = 0.2
+# Climbing to the strongest ordinary tier on an uncertain route needs more
+# than a minority vote. A 68/32 sonnet-vs-opus split on a well-specified
+# build is Jev preferring Sonnet, not doubting it; at 20% that split always
+# landed on Opus (owner decision 2026-10-01). Weight outside the ordinary set
+# (Fable, human) still means "hard" at MIN_FALLBACK_MASS.
+MIN_TOP_TIER_FALLBACK_MASS = 0.4
 
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
@@ -122,8 +128,12 @@ def estimate_costs(
 
 def _fallback(probabilities: Mapping[str, float] | None,
               ordinary: Mapping[str, Mapping], strongest: str) -> str:
-    contenders = [k for k, p in (probabilities or {}).items() if p >= MIN_FALLBACK_MASS]
-    if not contenders or any(k not in ordinary for k in contenders):
+    probabilities = probabilities or {}
+    if any(k not in ordinary and p >= MIN_FALLBACK_MASS for k, p in probabilities.items()):
+        return strongest
+    contenders = [k for k, p in probabilities.items() if k in ordinary and p >= (
+        MIN_TOP_TIER_FALLBACK_MASS if k == strongest else MIN_FALLBACK_MASS)]
+    if not contenders:
         return strongest
     return max(contenders, key=lambda k: ordinary[k]["tier"])
 
