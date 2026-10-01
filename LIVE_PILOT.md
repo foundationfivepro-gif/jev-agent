@@ -1,3 +1,7 @@
+> Live host-routing code is now available through explicit dependency injection; see
+> [LIVE_ROUTING.md](LIVE_ROUTING.md) for setup, verified coverage and remaining gates.
+> Historical mock/pilot claims below do not constitute activation evidence.
+
 # Bounded synthetic live-pilot preparation
 
 Status: **code and offline fixture tests only**. No live OpenRouter request has

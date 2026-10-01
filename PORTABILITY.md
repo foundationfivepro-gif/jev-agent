@@ -1,3 +1,7 @@
+> Live host-routing code is now available through explicit dependency injection; see
+> [LIVE_ROUTING.md](LIVE_ROUTING.md) for setup, verified coverage and remaining gates.
+> Historical mock/pilot claims below do not constitute activation evidence.
+
 # JEV offline portability milestone
 
 ## Current routing policy (1 October 2026)

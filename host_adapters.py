@@ -1,7 +1,7 @@
 """Host-aware recommendations require an independently bound JEV selector.
 
-This module has no provider or execution client and no deterministic model
-fallback. Namespace labels never convert API IDs to host executor controls.
+Live providers are supplied only through the guarded composition root; there is
+no deterministic model fallback. Namespace labels never convert API IDs to host executor controls.
 Snapshots and decision IDs are observations, not authentication or permission.
 """
 from __future__ import annotations
@@ -48,9 +48,8 @@ class TrustedJevSelector:
     A decision candidate cannot supply or upgrade these provenance fields. The
     binding itself does not authorize a paid call, data transmission or dispatch;
     any live integration must independently enforce those requirements and
-    reserve the routing budget before a call. That boundary is not implemented:
-    jev_observed bindings are currently blocked before invocation. Tests bind a
-    synthetic callback, and public MCP endpoints have no binding.
+    reserve the routing budget before a call. Live bindings require the guarded
+    OpenRouterSelector. MCP activation requires explicit trusted host setup.
     """
     source_id: str
     evidence_status: Literal["synthetic", "jev_observed"]
@@ -173,8 +172,10 @@ def recommend_route(task: TaskEnvelope | Mapping[str, Any], snapshot: Capability
     # server-side selector. No public MCP argument is accepted at this boundary.
     if not isinstance(selector, TrustedJevSelector):
         return fail("unavailable", "A trusted JEV selector is required; no model recommendation was made.")
-    if selector.evidence_status != "synthetic":
-        return fail("unavailable", "Live JEV privacy authorization and routing-budget reservations are not provisioned.")
+    if selector.evidence_status == "jev_observed":
+        from live_routing import OpenRouterSelector
+        if type(selector.select) is not OpenRouterSelector:
+            return fail("unavailable", "Live selector requires the guarded OpenRouter composition root.")
     # Screen the original inputs, including unused tool-schema text, before the
     # extension boundary. No prose claiming a local exception can exempt a model
     # call. Even screened inputs are minimized before they reach the callback.
@@ -219,7 +220,7 @@ def recommend_route(task: TaskEnvelope | Mapping[str, Any], snapshot: Capability
     except PrivacyError:
         return fail("invalid_response", "JEV decision failed the local privacy boundary.")
     if task.budget_usd is not None and decision.cost_usd is not None and decision.cost_usd > task.budget_usd:
-        return fail("budget_exceeded", "Recorded synthetic routing cost exceeds this task's budget.")
+        return fail("budget_exceeded", "Recorded routing cost exceeds this task's budget.")
     proposal = decision.candidate
     model = next((m for m in eligible if (m.model_id, m.namespace) ==
                   (proposal.selected_model_id, proposal.selected_model_namespace)), None)
@@ -238,7 +239,8 @@ def recommend_route(task: TaskEnvelope | Mapping[str, Any], snapshot: Capability
                             routing_decision_id=decision.decision_id, routing_request_fingerprint=fingerprint,
                             routing_source_id=selector.source_id, routing_evidence_status=selector.evidence_status,
                             routing_usage=decision.usage, routing_cost_usd=decision.cost_usd,
-                            routing_cost_kind="synthetic" if decision.cost_usd is not None else "unknown")
+                            routing_cost_kind=("billed" if selector.evidence_status == "jev_observed" else "synthetic")
+                            if decision.cost_usd is not None else "unknown")
 
 
 def dispatch_recommendation(decision: DecisionResponse | Mapping[str, Any], **_unused) -> DecisionResponse:

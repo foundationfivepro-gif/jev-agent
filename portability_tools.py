@@ -1,4 +1,4 @@
-"""Shared mock-only MCP interfaces, identical on the local and remote servers.
+"""Shared MCP interfaces; live routing requires explicit trusted host setup.
 
 No request field conveys caller identity. The hosting transport owns the trusted
 access context, and the writing service independently authenticates and scopes it.
@@ -19,7 +19,7 @@ def trusted_access(token: str | None):
         _access_token.reset(marker)
 
 
-def register_portability_tools(mcp):
+def register_portability_tools(mcp, *, host_routing=None):
     from writing_service import PlanRequest, GenerationRequest
     import writing_service
     from host_contracts import CapabilitySnapshot, TaskEnvelope
@@ -40,10 +40,18 @@ def register_portability_tools(mcp):
                                                 access_token=_access_token.get())
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False,
-                          "idempotentHint": True, "openWorldHint": False})
+                          "idempotentHint": True, "openWorldHint": host_routing is not None})
     def jev_recommend_host_route(task: TaskEnvelope, snapshot: CapabilitySnapshot,
                                  runtime_id: str, session_id: str) -> dict:
         """Recommend from an observed host catalog only. Never dispatch or grant permission."""
+        if host_routing is not None:
+            from live_routing import LiveRoutingError
+            try:
+                if (runtime_id, session_id) != (host_routing.runtime_id, host_routing.session_id):
+                    raise LiveRoutingError()
+                return host_routing.recommend(task).model_dump(mode="json")
+            except Exception:
+                return {"status": "unavailable", "failure": "unavailable"}
         # Tool input is an untrusted observation. Only an independently bound
         # host adapter can attest actual runtime discovery; this endpoint cannot.
         snapshot = snapshot.model_copy(update={"evidence_status": "synthetic"})

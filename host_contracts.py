@@ -190,7 +190,7 @@ class DecisionResponse(StrictContract):
     routing_request_fingerprint: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")] | None = None
     routing_usage: RoutingUsage | None = None
     routing_cost_usd: Number | None = None
-    routing_cost_kind: Literal["synthetic", "unknown"] | None = None
+    routing_cost_kind: Literal["synthetic", "billed", "unknown"] | None = None
     routing_source_id: Identifier | None = None
     routing_evidence_status: Literal["synthetic", "jev_observed"] | None = None
     failure: Failure | None = None
@@ -218,7 +218,8 @@ class DecisionResponse(StrictContract):
                     self.routing_request_fingerprint is None or self.routing_cost_kind is None):
                 raise ValueError("recommendation requires a recorded, bound JEV decision")
             if ((self.routing_cost_usd is None) != (self.routing_cost_kind == "unknown") or
-                    (self.routing_cost_kind == "synthetic" and self.routing_evidence_status != "synthetic")):
+                    (self.routing_cost_kind == "synthetic" and self.routing_evidence_status != "synthetic") or
+                    (self.routing_cost_kind == "billed" and self.routing_evidence_status != "jev_observed")):
                 raise ValueError("routing accounting must distinguish synthetic and unknown cost")
         elif (self.failure != self.status or self.selected_model_id is not None or
               self.selected_model_namespace is not None or self.selected_effort is not None or
