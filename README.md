@@ -78,6 +78,11 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 selected model, and median Jev latency. Traces store shapes and hashes, never subagent
 output.
 
+`python3 scripts/replay_routing.py` reruns those recorded decisions under other routing
+thresholds, offline, and shows each variant's model mix, estimated cost and how many
+routes it would move to a cheaper tier. A moved route never ran on its new model, so a
+cheaper variant is a hypothesis to test on real tasks, not a measured saving.
+
 Every Jev answer is checked before it is used: the choice must be one that was offered
 and the most probable one, and probabilities must lie in 0..1 and sum to 1. A malformed
 answer is an `InvalidResponse` (a `TransportError`), so every caller treats it as no

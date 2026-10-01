@@ -127,15 +127,66 @@ def estimate_costs(
 
 
 def _fallback(probabilities: Mapping[str, float] | None,
-              ordinary: Mapping[str, Mapping], strongest: str) -> str:
+              ordinary: Mapping[str, Mapping], strongest: str, *,
+              min_fallback_mass: float = MIN_FALLBACK_MASS,
+              min_top_tier_mass: float = MIN_TOP_TIER_FALLBACK_MASS) -> str:
     probabilities = probabilities or {}
-    if any(k not in ordinary and p >= MIN_FALLBACK_MASS for k, p in probabilities.items()):
+    if any(k not in ordinary and p >= min_fallback_mass for k, p in probabilities.items()):
         return strongest
     contenders = [k for k, p in probabilities.items() if k in ordinary and p >= (
-        MIN_TOP_TIER_FALLBACK_MASS if k == strongest else MIN_FALLBACK_MASS)]
+        min_top_tier_mass if k == strongest else min_fallback_mass)]
     if not contenders:
         return strongest
     return max(contenders, key=lambda k: ordinary[k]["tier"])
+
+
+def select(
+    proposed: str,
+    certainty: float,
+    probabilities: Mapping[str, float] | None,
+    complexity: float | None,
+    eligible: Mapping[str, Mapping],
+    *,
+    min_confidence: float = MIN_CONFIDENCE,
+    mechanical_complexity: float = MECHANICAL_COMPLEXITY,
+    mechanical_confidence: float = MECHANICAL_CONFIDENCE,
+    min_fallback_mass: float = MIN_FALLBACK_MASS,
+    min_top_tier_mass: float = MIN_TOP_TIER_FALLBACK_MASS,
+) -> tuple[str, float, str | None]:
+    """
+    The routing policy on its own: Jev's answer in, (selected, threshold, fallback) out.
+
+    Pure, so `scripts/replay_routing.py` can rerun recorded decisions under other
+    thresholds and get exactly what `route_model` would have done.
+    """
+    # Fail closed toward capability: an uncertain route goes to the strongest
+    # tier Jev seriously considered (see MIN_FALLBACK_MASS), because a cheap
+    # failure costs the cheap attempt plus the expensive retry plus the latency
+    # of noticing. Escalation-only tiers are excluded from that fallback —
+    # uncertainty is not a reason to pay double.
+    ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
+    strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
+
+    threshold = min_confidence
+    if (
+        complexity is not None and float(complexity) < mechanical_complexity
+        and proposed in ordinary
+    ):
+        threshold = min(min_confidence, mechanical_confidence)
+
+    fallback = None
+    if certainty >= threshold:
+        selected = proposed
+    else:
+        selected = _fallback(probabilities, ordinary, strongest,
+                             min_fallback_mass=min_fallback_mass,
+                             min_top_tier_mass=min_top_tier_mass)
+        # A fallback that lands on the proposed model changed nothing: it is not
+        # an escalation, so it must not be reported as one.
+        fallback = None if selected == proposed else "low_confidence"
+    if selected not in eligible and selected != "human":
+        selected, fallback = strongest, "not_eligible"
+    return selected, threshold, fallback
 
 
 def route_model(
@@ -181,33 +232,11 @@ def route_model(
     })
 
     answer = result.answers["model"]
-    # Fail closed toward capability: an uncertain route goes to the strongest
-    # tier Jev seriously considered (see MIN_FALLBACK_MASS), because a cheap
-    # failure costs the cheap attempt plus the expensive retry plus the latency
-    # of noticing. Escalation-only tiers are excluded from that fallback —
-    # uncertainty is not a reason to pay double.
-    ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
-    strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
     proposed = str(answer.value)
     complexity = result.value("complexity")
-
-    threshold = min_confidence
-    if (
-        complexity is not None and float(complexity) < MECHANICAL_COMPLEXITY
-        and proposed in ordinary
-    ):
-        threshold = min(min_confidence, MECHANICAL_CONFIDENCE)
-
-    fallback = None
-    if answer.certainty >= threshold:
-        selected = proposed
-    else:
-        selected = _fallback(answer.probabilities, ordinary, strongest)
-        # A fallback that lands on the proposed model changed nothing: it is not
-        # an escalation, so it must not be reported as one.
-        fallback = None if selected == proposed else "low_confidence"
-    if selected not in eligible and selected != "human":
-        selected, fallback = strongest, "not_eligible"
+    selected, threshold, fallback = select(
+        proposed, answer.certainty, answer.probabilities, complexity, eligible,
+        min_confidence=min_confidence)
 
     decision = {
         "selected": selected,
