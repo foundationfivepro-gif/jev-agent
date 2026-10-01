@@ -1,0 +1,148 @@
+{
+  "task": {
+    "request_id": "live-native-worker-smoke-2026-10-01",
+    "purpose": "Synthetic native worker verification. Sort the integers [7, 2, 9, 2] ascending and compute their sum. Return only JSON with keys sorted and sum. Do not use tools or make external changes.",
+    "acceptance_criteria": [
+      "Return exactly {\"sorted\":[2,2,7,9],\"sum\":20}.",
+      "No tools, files, network requests, or external side effects."
+    ],
+    "context_references": [],
+    "data_class": "public",
+    "authorized_destinations": [
+      "openrouter.ai"
+    ],
+    "budget_usd": 0.001344,
+    "deadline": 1790825118.8047774,
+    "task_kind": "narrow",
+    "required_tools": [],
+    "parent_has_context": false,
+    "inspection_larger_than_result": false
+  },
+  "snapshot": {
+    "surface": "dot_parent",
+    "runtime_id": "dot-parent-01a0f218-a8a3-7384-9cbe-01c8a85020fc",
+    "session_id": "root-authorized-native-smoke-2026-10-01",
+    "observed_at": 1790821518.8047774,
+    "expires_at": 1790825118.8047774,
+    "available": true,
+    "observed_tools": [],
+    "dispatch_controls": [
+      "delegate",
+      "model_override",
+      "effort_override"
+    ],
+    "models": [
+      {
+        "model_id": "gpt-6-luna",
+        "namespace": "openai_native",
+        "family": "luna",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "supported_tools": [],
+        "available": true
+      },
+      {
+        "model_id": "gpt-6.1-sol",
+        "namespace": "openai_native",
+        "family": "sol",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "supported_tools": [],
+        "available": true
+      },
+      {
+        "model_id": "gpt-6-astra",
+        "namespace": "openai_native",
+        "family": "astra",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "supported_tools": [],
+        "available": true
+      }
+    ],
+    "evidence_status": "runtime_observed"
+  },
+  "recommendation": {
+    "schema_version": "1.0",
+    "policy_version": "jev-required-2026-10-01",
+    "request_id": "live-native-worker-smoke-2026-10-01",
+    "status": "recommended",
+    "selected_model_id": "gpt-6-luna",
+    "selected_model_namespace": "openai_native",
+    "selected_effort": "low",
+    "execution_mode": "delegate",
+    "explanation": "Validated JEV recommendation; host authorization is still required.",
+    "evidence_status": "runtime_observed",
+    "source": "jev",
+    "routing_decision_id": "gen-dec-1790821519-uh7HduqHau0t8AP85YJq",
+    "routing_request_fingerprint": "22f4fcd182c4110ec05fc363dfb982e78d00bbc4ddb76f10f814c920ceaae636",
+    "routing_usage": {
+      "input_tokens": 888,
+      "output_tokens": 80
+    },
+    "routing_cost_usd": 3.7296e-05,
+    "routing_cost_kind": "billed",
+    "routing_source_id": "openrouter-systemone",
+    "routing_evidence_status": "jev_observed",
+    "failure": null,
+    "permission_granted": false,
+    "dispatch_enabled": false
+  },
+  "pricing": {
+    "input_per_token_usd": "0.000000042",
+    "output_per_token_usd": "0",
+    "full_context_upper_usd": "0.001344000",
+    "context_tokens": 32000,
+    "source": "https://openrouter.ai/api/v1/models/typesafe/jev-1.13-20260917/endpoints"
+  },
+  "ledger": {
+    "cap_usd": "5",
+    "reserved_usd": "0",
+    "charged_usd": "0.046548454",
+    "halted": null,
+    "receipts": [
+      {
+        "actual_router_model": "typesafe/jev-1.13-20260917",
+        "decision": {
+          "candidate": {
+            "execution_mode": "delegate",
+            "selected_effort": "low",
+            "selected_model_id": "gpt-6-luna",
+            "selected_model_namespace": "openai_native"
+          },
+          "cost_usd": 3.7296e-05,
+          "decision_id": "gen-dec-1790821519-uh7HduqHau0t8AP85YJq",
+          "request_fingerprint": "22f4fcd182c4110ec05fc363dfb982e78d00bbc4ddb76f10f814c920ceaae636",
+          "request_id": "live-native-worker-smoke-2026-10-01",
+          "runtime_id": "dot-parent-01a0f218-a8a3-7384-9cbe-01c8a85020fc",
+          "session_id": "root-authorized-native-smoke-2026-10-01",
+          "usage": {
+            "input_tokens": 888,
+            "output_tokens": 80
+          }
+        },
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "payload_sha256": "d132c5fa2560da31f14290abccfd51089ef550759409915d20e8261d7abf0abb",
+        "pricing_evidence": "openrouter-jev-endpoints-2026-10-01",
+        "status": "routed"
+      },
+      {
+        "billed_usd": "0.046511158",
+        "new_paid_calls": 0,
+        "source": "user-delegation-verified-prior-pilot",
+        "status": "imported"
+      }
+    ]
+  },
+  "dispatch": "pending-parent-native-dispatch",
+  "catalog_provenance": "Parent delegated task attests native worker IDs; child tool catalog independently lists the same IDs and efforts."
+}

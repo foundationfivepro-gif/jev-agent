@@ -4,8 +4,8 @@
 with model `jev-latest`, a guarded JEV selector, durable routing reservations,
 server-owned host discovery, validated recommendation receipts, and an injected
 host dispatch path. This is executable live code; offline tests substitute only
-its network/host boundaries. Live network and native worker execution have not
-been verified in this checkout. Writing tools remain disabled/mock-only.
+its network/host boundaries. One live synthetic JEV routing request has now been verified through the
+protected proxy; native worker execution is pending parent dispatch. Writing tools remain disabled/mock-only.
 
 No changes activate the existing Claude MCP configuration, remote OAuth, current
 chat model, hidden calls, or Mac. A repository push can trigger the existing
@@ -74,8 +74,8 @@ Required binding fields:
   routing and generation workers. Never use a fresh ledger to reset allowance.
   This environment's canonical path is
   `/workspace/scratch/jev-canonical-budget.sqlite`. It imports the user-verified
-  previous charge **$0.046511158**; no new paid requests have run here. Available
-  allowance is **$4.953488842**. Do not run concurrent paid tasks elsewhere with
+  previous charge **$0.046511158**, plus the verified routing call **$0.000037296**.
+  Aggregate spend is **$0.046548454**; available allowance is **$4.953451546**. Do not run concurrent paid tasks elsewhere with
   another copy. Persist/reconcile this file before moving environments.
 - A host dispatcher that independently enforces permissions, generation budget
   reservations/settlement in that same ledger, and durable request idempotency.
@@ -97,9 +97,10 @@ Tests cover real SDK registration, identity spoofing, unknown billing, budget
 exhaustion/overruns, receipt validation, synthetic-provenance rejection, privacy,
 non-recursion, replay prevention, and catalog changes before dispatch.
 
-A live synthetic smoke still requires the issued placeholder/proxy binding,
-verified current charge upper bound and resolved JEV identity. Real native
-worker verification additionally requires the dispatcher in this exact host.
+The live synthetic routing smoke passed using the verified `OPENROUTER_API`
+network-secret placeholder via `HTTPS_PROXY`; the raw credential never entered
+this process. The legacy raw key was not accessed. Real native worker
+verification still requires the parent dispatcher.
 Remote clients need their separate approved OAuth issuer/audience/scopes,
 principal-to-host binding and registered URL; none are provisioned here.
 Latest Sonnet/Opus writing transport/catalog installation is a separate unfinished
@@ -110,5 +111,21 @@ Verification on 2026-10-01: **697 passed, 7 skipped, 82 subtests passed** using 
 locked dependencies and credential-free/network-blocked test runner. Independent
 review identified synthetic dispatch acceptance, broad model identity, missing
 quote evidence, and `NO_PROXY` bypass. These were corrected and regression-tested.
-Live calls: **0**. Live billed evidence: **none from this fix**. The imported prior
-pilot charge is accounting evidence from the delegation, not a new live result.
+Live calls: **1**, billed **$0.000037296**. See the [complete validated
+receipt](evidence/live-native-route-2026-10-01.json). JEV selected `gpt-6-luna`,
+`low` effort, `delegate`; actual router `typesafe/jev-1.13-20260917`, 888 input and
+80 output tokens. The imported prior pilot charge remains separately identified.
+
+Fresh endpoint metadata reports $0.042/million input tokens, zero output cost,
+and a 32,000-token context. Reserving the entire input context established a
+conservative **$0.001344** request bound, released on settlement. Only one
+synthetic request was sent, with no retry. Decision ID:
+`gen-dec-1790821519-uh7HduqHau0t8AP85YJq`. Native task: sort `[7,2,9,2]` and sum;
+expected output `{"sorted":[2,2,7,9],"sum":20}`, no tools or side effects.
+
+Vercel preview for code commit `f8c1c188026bae22bde37c71654efb95c11b18fc`
+reports `BLOCKED`, GitHub status "Deployment was blocked", and links to Vercel
+team-configuration troubleshooting. GitHub resolves the commit author/committer
+to `adamsavoy`. The connected Vercel team is `foundationfivepro-7852s-projects`.
+The tools expose no more specific membership/plan error, and the build-log tool
+is unavailable. No team membership, account links, grants or settings changed.
