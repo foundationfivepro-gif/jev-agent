@@ -42,27 +42,32 @@ MIN_FALLBACK_MASS = 0.2
 
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
-# Fable is the top of the range, not a cheap tier: it costs twice Opus. It is
+# Fits follow Anthropic's model selection matrix (docs: choosing-a-model).
+# Fable is the top of the range, not a cheap tier: it costs 2.5x Opus. It is
 # escalation_only — Jev may propose it with confidence, but an *uncertain* route
 # falls back to an ordinary tier (at most Opus), never up to Fable.
 DEFAULT_CATALOG: dict[str, dict] = {
     "haiku":  {"id": "claude-haiku-4-5",
                "fit": "Classification, formatting, simple mechanical edits, "
-                      "search-and-report subtasks that return a short answer",
+                      "high-volume or latency-sensitive sub-agent tasks that "
+                      "return a short answer",
                "cost_in": 1.0, "cost_out": 5.0, "tier": 1},
-    "sonnet": {"id": "claude-sonnet-5",
-               "fit": "Normal coding, research, multi-file edits, "
-                      "most day-to-day engineering",
+    "sonnet": {"id": "claude-sonnet-5-5",
+               "fit": "Everyday coding, research and agent work: code generation, "
+                      "multi-file edits, data analysis, content creation, agentic tool use",
                "cost_in": 2.0, "cost_out": 10.0, "tier": 2},
-    "opus":   {"id": "claude-opus-5",
-               "fit": "Complex architecture, hard debugging, subtle refactors, "
-                      "work where a wrong answer is expensive to detect",
-               "cost_in": 5.0, "cost_out": 25.0, "tier": 3},
+    "opus":   {"id": "claude-opus-5-5",
+               "fit": "Complex agentic coding: large-scale refactoring, complex systems "
+                      "engineering and architecture, hard debugging, vision-heavy work, "
+                      "computer use, work where a wrong answer is expensive to detect",
+               "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
     "fable":  {"id": "claude-fable-5-1",
-               "fit": "Frontier complexity: long-horizon architecture, system design "
-                      "and complex multi-page web design where a wrong structural "
-                      "decision is expensive to unwind. Never routine tasks, and not "
-                      "for ordinary multi-step work that Opus handles",
+               "fit": "Frontier work Opus falls short on: agent sessions that run for "
+                      "hours, multistep deep research, analysis carried through to a "
+                      "finished document, spreadsheet or deck, complex multi-page web "
+                      "design where a wrong structural decision is expensive to unwind. "
+                      "Never routine tasks, and not for ordinary multi-step work that "
+                      "Opus handles",
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
 
