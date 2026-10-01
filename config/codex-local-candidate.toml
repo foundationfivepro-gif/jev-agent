@@ -1,0 +1,11 @@
+
+
+# Prepared JEV binding; enable only after host integration review.
+[mcp_servers.jev_bound]
+command = "/workspace/jev-venv/bin/python"
+args = ["/workspace/jev-agent/scripts/bound_routing_server.py", "--binding", "/workspace/operator-jev-binding.py"]
+enabled = false
+startup_timeout_sec = 20
+tool_timeout_sec = 40
+enabled_tools = ["jev_recommend_host_route"]
+env_vars = ["OPENROUTER_API", "HTTPS_PROXY", "SSL_CERT_FILE", "CODEX_PROXY_CERT"]

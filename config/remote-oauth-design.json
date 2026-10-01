@@ -1,0 +1,24 @@
+{
+  "status": "design_only_not_registered",
+  "resource": "https://jev-agent-git-codex-jev-c1aa85-foundationfivepro-7852s-projects.vercel.app/mcp",
+  "protected_resource_metadata": "https://jev-agent-git-codex-jev-c1aa85-foundationfivepro-7852s-projects.vercel.app/.well-known/oauth-protected-resource/mcp",
+  "issuer": null,
+  "authorization_endpoint": null,
+  "token_endpoint": null,
+  "jwks_uri": null,
+  "client_id": null,
+  "redirect_uris": [],
+  "grant_types": ["authorization_code"],
+  "pkce_methods": ["S256"],
+  "scopes": {
+    "routing:recommend": ["jev_recommend_host_route"],
+    "writing:plan": ["jev_plan_writing"],
+    "writing:generate": ["jev_generate_writing"],
+    "writing:read": ["writing_receipt", "writing_budget"]
+  },
+  "initial_requested_scopes": ["routing:recommend"],
+  "token_delivery": "Authorization header only",
+  "upstream_credential": "OPENROUTER_API protected-network binding, never a client OAuth token",
+  "required_server_checks": ["approved issuer and pinned JWKS origin", "signature algorithm allowlist", "exact resource audience", "expiry and not-before", "scope", "tenant and subject mapping", "revocation", "destination and data-class grants", "durable shared quotas", "trusted per-runtime discovery"],
+  "activation_dependencies": ["preview deployment unblocked", "host/resource acceptance", "issuer selection approval", "client registration and exact redirect URIs", "OAuth resource-server implementation and review", "durable ledger storage and revocation", "per-host binding and discovery"]
+}

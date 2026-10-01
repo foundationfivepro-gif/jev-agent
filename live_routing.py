@@ -35,10 +35,14 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 
 class _ForcedProxy(urllib.request.ProxyHandler):
     """Never allow NO_PROXY to bypass the protected credential proxy."""
+    def __init__(self, proxies, *, allowed_urls=None):
+        self.allowed_urls = frozenset(allowed_urls or {ENDPOINT})
+        super().__init__(proxies)
+
     def proxy_open(self, request, proxy, scheme):
         from urllib.parse import urlsplit
         parsed = urlsplit(proxy)
-        if request.full_url != ENDPOINT or request.type != "https":
+        if request.full_url not in self.allowed_urls or request.type != "https":
             raise LiveRoutingError()
         request.set_proxy(parsed.netloc, parsed.scheme)
         return None

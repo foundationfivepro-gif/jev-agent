@@ -5,7 +5,7 @@ with model `jev-latest`, a guarded JEV selector, durable routing reservations,
 server-owned host discovery, validated recommendation receipts, and an injected
 host dispatch path. This is executable live code; offline tests substitute only
 its network/host boundaries. One live synthetic JEV routing request has now been verified through the
-protected proxy; native worker execution is pending parent dispatch. Writing tools remain disabled/mock-only.
+protected proxy; the parent also confirmed one successful native Luna worker dispatch. Writing tools remain disabled/mock-only.
 
 No changes activate the existing Claude MCP configuration, remote OAuth, current
 chat model, hidden calls, or Mac. A repository push can trigger the existing
@@ -99,8 +99,10 @@ non-recursion, replay prevention, and catalog changes before dispatch.
 
 The live synthetic routing smoke passed using the verified `OPENROUTER_API`
 network-secret placeholder via `HTTPS_PROXY`; the raw credential never entered
-this process. The legacy raw key was not accessed. Real native worker
-verification still requires the parent dispatcher.
+this process. The legacy raw key was not accessed. The parent reported the actual native worker result at 02:27:39 UTC:
+`{"sorted":[2,2,7,9],"sum":20}` from `/root/verify_jev_selected_worker`, using
+`gpt-6-luna` at `low` effort. This proves one explicit route and dispatch, not
+global automatic activation or a change to the current parent model.
 Remote clients need their separate approved OAuth issuer/audience/scopes,
 principal-to-host binding and registered URL; none are provisioned here.
 Latest Sonnet/Opus writing transport/catalog installation is a separate unfinished
@@ -129,3 +131,13 @@ team-configuration troubleshooting. GitHub resolves the commit author/committer
 to `adamsavoy`. The connected Vercel team is `foundationfivepro-7852s-projects`.
 The tools expose no more specific membership/plan error, and the build-log tool
 is unavailable. No team membership, account links, grants or settings changed.
+
+
+## Prepared installation artifacts (not applied)
+
+See [INSTALL_READINESS.md](INSTALL_READINESS.md), the additive disabled
+[local Codex candidate](config/codex-local-candidate.toml), disabled
+[remote candidate](config/codex-remote-candidate.toml), and
+[OAuth design](config/remote-oauth-design.json). Real writing HTTP/catalog
+adapters now exist in `live_writing.py`; authenticated public writing service
+integration remains unfinished and the mock service stays isolated.

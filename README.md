@@ -1,10 +1,11 @@
 # jev-agent
 
-> **Offline portability preparation (not deployed).** This isolated change adds
-> mock-only writing tools and host-aware recommendations. Live provider generation,
-> live dispatch, OAuth grants, deployment, paid tests, and connected-host support
-> remain disabled/unverified. Existing historical measurement claims below do not
-> describe results of this change. See [PORTABILITY.md](PORTABILITY.md).
+> **Live routing implementation with bounded verification.** The new explicit
+> OpenRouter binding has a live billed JEV receipt and one parent-confirmed native
+> Luna worker result. Automatic global activation, remote OAuth and public live
+> writing service integration are not installed. See [LIVE_ROUTING.md](LIVE_ROUTING.md)
+> and [INSTALL_READINESS.md](INSTALL_READINESS.md). Historical measurements below
+> do not establish coverage of every host or workflow.
 
 ## Codex JEV-required routing
 

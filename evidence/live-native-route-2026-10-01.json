@@ -143,6 +143,32 @@
       }
     ]
   },
-  "dispatch": "pending-parent-native-dispatch",
+  "dispatch": {
+    "status": "completed",
+    "surface": "dot_parent",
+    "execution_mode": "delegate",
+    "model": "gpt-6-luna",
+    "effort": "low",
+    "worker_task": "/root/verify_jev_selected_worker",
+    "completed_at": "2026-10-01T02:27:39Z",
+    "result": {
+      "sorted": [
+        2,
+        2,
+        7,
+        9
+      ],
+      "sum": 20
+    },
+    "acceptance_passed": true,
+    "evidence_source": "parent dispatch confirmation in delegated task",
+    "native_worker_usage": null,
+    "native_worker_cost_usd": null,
+    "limitations": [
+      "One explicitly routed native worker; no global automatic activation.",
+      "Current parent model unchanged; hidden platform calls are outside this integration.",
+      "Worker cost is unobserved, separate from the OpenRouter synthetic-spend ledger."
+    ]
+  },
   "catalog_provenance": "Parent delegated task attests native worker IDs; child tool catalog independently lists the same IDs and efforts."
 }
