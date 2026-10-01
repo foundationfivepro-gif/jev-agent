@@ -1,0 +1,20 @@
+# PROPOSED RECOMMENDATION-ONLY DIAGNOSTIC ACTIVATION. Not loaded by Codex from this directory.
+# Hook explicitly denies worker execution. Merge into /workspace/jev-agent/.codex/config.toml only after approval.
+[mcp_servers.jev_bound]
+command = "/workspace/jev-venv/bin/python"
+args = ["/workspace/jev-agent/scripts/bound_routing_server.py", "--binding", "/workspace/jev-agent/codex_operator.py"]
+enabled = true
+required = true
+startup_timeout_sec = 20
+tool_timeout_sec = 40
+enabled_tools = ["jev_recommend_host_route"]
+env_vars = ["OPENROUTER_API", "HTTPS_PROXY", "SSL_CERT_FILE", "CODEX_PROXY_CERT"]
+
+[[hooks.PreToolUse]]
+matcher = "^(Agent|spawn_agent)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/workspace/jev-venv/bin/python /workspace/jev-agent/codex_worker_hook.py"
+timeout = 40
+statusMessage = "Validate JEV routing for an approved synthetic worker"

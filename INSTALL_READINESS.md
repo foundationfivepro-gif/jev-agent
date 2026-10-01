@@ -101,12 +101,12 @@ A low-level runnable transport is not proof that the public writing tools are li
 | Canonical OpenRouter ledger | $0.046548454 spent; $4.953451546 remaining; no reservations |
 | Native worker billing | Unknown; do not include it in an invented total/savings claim |
 | Codex configuration | Prepared disabled candidate; not applied |
-| Per-session discovery/permission/dispatch binding | Operator implementation required |
+| Per-session discovery/permission binding | Concrete local synthetic operator implemented; fresh CLI startup blocked by read-only filesystem; dispatch not authorized |
 | Automatic routing enforcement | Host must invoke bound adapter; not globally installed |
 | Real writing transport/catalog code | Implemented and offline tested; not paid/live verified |
 | Public writing MCP integration | Unfinished; auth/plan/selector/live contracts listed above |
 | Remote OAuth | Exact resource/scopes proposed; issuer/client/grants unset |
-| Vercel preview | Blocked by collaboration gate; parent investigating |
+| Vercel preview | Commit ba0a860 passed; connector publication identity corrected |
 | Mac, main, Claude config | Unchanged |
 
 ## Publication identity
@@ -126,3 +126,47 @@ connector identity.
 Final offline verification: **713 passed, 7 skipped, 82 subtests passed**.
 Independent review ran 39 focused tests and found no new blocking safety defect.
 Remaining writing/OAuth/host-integration dependencies above are explicit.
+
+
+## Local CLI operator and hook: implementation, not installation
+
+`codex_operator.py` binds the existing canonical ledger, exact approved public
+synthetic fixture, protected OpenRouter proxy, fresh `model/list` catalog, and
+fresh JEV pricing metadata. It does not reset the allowance. `codex_worker_hook.py`
+accepts the CLI `spawn_agent`/`Agent` vocabulary (`fork_context`, not dot
+`fork_turns`), validates JEV evidence, and **denies native execution** because no
+host-enforced execution budget/tool restriction contract is available here.
+Model override controls are declared against the documented CLI interface;
+operator verification that this session exposes them remains required.
+
+The exact proposed diagnostic config is `config/codex-local-activation.toml`.
+It points to `/workspace/jev-venv/bin/python`, this checkout's
+`scripts/bound_routing_server.py --binding /workspace/jev-agent/codex_operator.py`,
+and `/workspace/jev-agent/codex_worker_hook.py`. It is not loaded from `config/`.
+No `.codex/config.toml` or hook trust was changed.
+
+After separate action-time approval, merge the proposal into
+`/workspace/jev-agent/.codex/config.toml` without replacing existing entries,
+then review/trust that exact command hook in the CLI `/hooks` interface. Approval
+scope: this repository, local CLI only, recommendation-only diagnostic interception
+of Agent/spawn_agent, the exact public synthetic fixture, existing protected
+credential binding, and existing aggregate OpenRouter cap. Other matched tasks
+are denied. Do not use a hook-trust bypass. This is **not** an approval request
+for live worker execution or a dot connection. Trusting a hook cannot cure the
+missing execution controls; local hook launch errors/timeouts can fail open at
+host level, so this is not universal enforcement.
+
+Fresh installed `codex-cli 0.159.0-alpha.3` app-server discovery was attempted.
+It exits before initialize with a read-only filesystem error, including with
+transient writable sqlite/log paths. No thread/turn, OAuth, or inference was
+started. A fake app-server subprocess validates the protocol offline; it is not
+live host evidence. The environment owner must provide a working authorized
+CLI state directory before a fresh-session host test is possible; HOME and
+CODEX_HOME were not changed. No additional paid call was made.
+
+Local CLI implementation verification: 735 passed, 7 skipped, 82 subtests passed.
+
+The operator quote now rejects missing auxiliary fee metadata, nonzero auxiliary
+fees, and mismatched structured catalog identities. If OpenRouter omits those
+fields, routing stays unavailable until an independently verified complete fee
+bound is supplied in reviewed code; omission is not treated as zero.

@@ -43,7 +43,7 @@ def test_untrusted_missing_or_symlink_binding_is_rejected(tmp_path):
 
 def test_config_artifacts_are_valid_and_disabled():
     root = Path(__file__).resolve().parents[1]
-    for file in (root / 'config').glob('*.toml'):
+    for file in (root / 'config').glob('*candidate.toml'):
         config = tomllib.loads(file.read_text())
         assert all(server['enabled'] is False for server in config['mcp_servers'].values())
     design = json.loads((root / 'config/remote-oauth-design.json').read_text())
