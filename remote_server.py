@@ -40,12 +40,9 @@ without it. Two ways to present it:
 
     header (preferred)  Add custom connector -> No sign-in -> Request headers
                         authorization = "Bearer <token>"
-    path (fallback)     Deploy at /mcp and use URL https://host/t/<token>/mcp
-                        if your org lacks the request-headers beta
-
-The path form puts a credential in a URL, which ends up in logs and history.
-Prefer the header. If you use the path form, treat the token as disposable and
-rotate it freely — it grants only these seven tools.
+    OAuth preparation is mock-only. New writing tools require their separate scoped
+    authorization context and remain disabled without an injected mock service.
+    URL path credentials are rejected: they leak into logs and browser history.
 
 Run locally:   JEV_REMOTE_TOKEN=x OPENROUTER_API_KEY=... python remote_server.py
 Deploy:        see vercel.json and api/index.py
@@ -59,6 +56,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
+from decision_contracts import CommandSource
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -67,7 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # are an audit aid, not the product. Must be set before core is imported.
 os.environ.setdefault("JEV_TRACE_DIR", "/tmp/jev-traces")
 
-from mcp.server.mcpserver import MCPServer  # noqa: E402
+from safe_mcp import SafeMCPServer as MCPServer  # noqa: E402
 from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import JSONResponse, PlainTextResponse  # noqa: E402
@@ -131,7 +129,9 @@ class CommandDecision(BaseModel):
     decision: Literal["allow", "review", "block"]
     reason: str
     binaries: list[str]
-    source: Literal["policy", "model", "unavailable"]
+    source: CommandSource
+
+    schema_version: Literal["1.1"] = "1.1"
 
 
 class ModelRouteDecision(BaseModel):
@@ -143,6 +143,10 @@ class ModelRouteDecision(BaseModel):
     probabilities: dict[str, float]
     source: Literal["policy", "model"]
     cost_per_mtok: dict[str, float]
+
+    status: Literal["recommended", "no_eligible_model", "invalid_catalog", "invalid_request", "invalid_response"] = "recommended"
+    failure: Literal["no_eligible_model", "invalid_catalog", "invalid_request", "invalid_response"] | None = None
+    fallback: str | None = None
 
 
 class PathClassification(BaseModel):
@@ -193,6 +197,8 @@ def jev_evaluate(
     Booleans return a probability, not a verdict — pick the threshold yourself
     based on what being wrong costs.
     """
+    from privacy import screen_outbound
+    screen_outbound({"state": state, "questions": questions})
     _require_key()
     if not questions:
         raise ValueError("questions is empty")
@@ -361,7 +367,8 @@ def jev_route_model(
                            "applies.") from exc
     chosen = cat.get(d["selected"], {})
     return ModelRouteDecision(
-        selected=d["selected"], model_id=chosen.get("id"),
+        selected=d["selected"], status=d.get("status", "recommended"),
+        failure=d.get("failure"), fallback=d.get("fallback"), model_id=chosen.get("id"),
         proposed=None if d.get("proposed") is None else str(d["proposed"]),
         confidence=round(float(d.get("confidence", 0.0)), 3),
         complexity=None if d.get("complexity") is None else round(float(d["complexity"]), 2),
@@ -389,7 +396,7 @@ def jev_classify_paths(
     with an ordinary name. Runs entirely in local deterministic code on the
     server; no model call.
     """
-    label, reasons = classify(paths, "")
+    label, reasons = classify(paths, "", allow_inline_allowlist=False)
     return PathClassification(label=LABEL_NAMES[label], reasons=reasons)
 
 
@@ -424,8 +431,8 @@ class TokenAuth(BaseHTTPMiddleware):
     Shared-secret gate.
 
     These tools spend a Jev quota, so an open endpoint is someone else's bill.
-    Accepts `Authorization: Bearer <token>`, `X-Api-Key: <token>`, or a
-    `/t/<token>` URL prefix for orgs without the request-headers beta.
+    Accepts `Authorization: Bearer <token>` or `X-Api-Key: <token>`.
+    URL credentials are rejected; this legacy gate never authorizes writing.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -444,30 +451,27 @@ class TokenAuth(BaseHTTPMiddleware):
             auth.strip() if auth else
             request.headers.get("x-api-key", "").strip()
         )
-        if not presented:
-            presented = getattr(request.state, "path_token", "")
 
         # Constant-time compare — the token is short and guessable byte by byte otherwise.
         import hmac
         if not hmac.compare_digest(presented, TOKEN):
             return JSONResponse(
                 {"error": "Unauthorized. Configure the connector's Request headers with "
-                          "authorization = 'Bearer <token>', or use the /t/<token>/mcp URL form."},
+                          "authorization = 'Bearer <token>'. URL credentials are unsupported."},
                 status_code=401,
             )
-        return await call_next(request)
+        from portability_tools import trusted_access
+        with trusted_access(presented):
+            return await call_next(request)
 
 
 class PathToken(BaseHTTPMiddleware):
-    """Strip a `/t/<token>` prefix and hand it to TokenAuth."""
+    """Reject the former credential-in-URL workaround without echoing it."""
 
     async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if path.startswith("/t/"):
-            parts = path.split("/", 3)
-            if len(parts) >= 4:
-                request.state.path_token = parts[2]
-                request.scope["path"] = "/" + parts[3]
+        if request.url.path.startswith("/t/") or request.url.query:
+            return JSONResponse({"error": "URL credentials and query parameters are unsupported"},
+                                status_code=400)
         return await call_next(request)
 
 
@@ -490,11 +494,16 @@ def build_app():
     )
     app.router.routes.append(Route("/health", health, methods=["GET"]))
     app.add_middleware(TokenAuth)
-    app.add_middleware(PathToken)     # runs first: strips the prefix before auth
+    app.add_middleware(PathToken)     # runs first: rejects unsafe legacy credential URLs
     return app
 
 
+from portability_tools import register_portability_tools
+register_portability_tools(mcp)
+
 app = build_app()
+
+
 
 
 if __name__ == "__main__":

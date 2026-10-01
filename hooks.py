@@ -37,16 +37,19 @@ Three properties hold because this runs on every event:
 
   * It never exits non-zero. Exit 2 is Claude Code's blocking code, so a usage
     error or a crash here would block every prompt and every command.
-  * It answers inside HOOK_BUDGET_S. A slow Jev resolves to silence, and the
-    user's own permission flow decides.
-  * It never prompts. A hook `ask` overrides the user's allow rules and Bypass
-    permissions, so Jev's verdicts are recorded, not enforced. The only output
-    is a `deny`, reserved for the irreversible: dangerous constructs and
-    recursive deletion of root, home or a wildcard.
+  * It answers inside HOOK_BUDGET_S. A slow consequential-command check
+    requests approval; it never grants consent through an outage.
+  * The contract is enforcing: deterministic dangerous commands are denied;
+    model block/review, missing service, privacy failure and errors on an
+    outbound command ask the host for approval. Opaque interpreter and script
+    execution also requires approval before the local-command shortcut. Bypass mode cannot disable
+    these deterministic gates. A model allow emits no permission decision.
+    Routing updatedInput never emits allow, so host permission stays authoritative.
 
 What leaves the machine: the prompt text (first MAX_TASK_CHARS) and, for
 commands that reach outside, the command line go to Jev (TypeSafe's API). Anything
-credential-shaped is held back and not sent.
+sensitive is screened locally and held back. Detection is defense in depth,
+not authorization for a destination or content category.
 
     python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md
     python3 hooks.py install --dry-run
@@ -125,7 +128,11 @@ def _emit(payload: dict) -> None:
 
 def _pre_tool(decision: str | None, reason: str, updated: dict | None = None) -> dict:
     out: dict = {"hookEventName": "PreToolUse"}
+    if decision == "allow":
+        raise ValueError("hooks cannot grant host permission")
     if decision:
+        from privacy import safe_metadata
+        reason = safe_metadata(reason, max_chars=2000)
         out["permissionDecision"] = decision
         out["permissionDecisionReason"] = reason
     if updated is not None:
@@ -134,7 +141,7 @@ def _pre_tool(decision: str | None, reason: str, updated: dict | None = None) ->
 
 
 def _bypassing(data: dict) -> bool:
-    """The user chose Bypass permissions. An "ask" from us would override that choice."""
+    """Host mode is informational; it cannot bypass deterministic JEV gates."""
     return str(data.get("permission_mode") or "") == "bypassPermissions"
 
 
@@ -159,59 +166,102 @@ def _arm_budget(fallback: dict | None) -> None:
 
 
 def _looks_secret(text: str) -> bool:
-    from security_router import SECRET, classify
+    from privacy import PrivacyError, screen_outbound
 
-    return classify([], text)[0] == SECRET
+    try:
+        screen_outbound(text)
+    except PrivacyError:
+        return True
+    return False
 
 
 # --------------------------------------------------------------------- hooks
 
 
+def _opaque_execution(command: str) -> bool:
+    """Recognized shell syntax cannot establish arbitrary program side effects.
+
+    Ask for interpreters, script files and dynamic executable names before the
+    old local-command shortcut. This is deliberately conservative, not an OS
+    reference monitor: build/package tools and user-defined executables remain
+    subject to the host sandbox and permissions.
+    """
+    from permission_gate import SHELLS, _argvs, _shell_payload, executable_texts
+    interpreters = {"node", "nodejs", "deno", "bun", "perl", "ruby", "irb", "lua", "luajit", "php", "r", "rscript", "awk", "gawk", "nawk", "osascript"}
+    for text in executable_texts(command):
+        for argv in _argvs(text):
+            head = argv[0]
+            name = Path(head).name.lower()
+            # Runner arguments can install/execute arbitrary packages and hide
+            # an interpreter behind option values. The legacy _unwrap_runner
+            # does not parse uv or package-option arity, so do not treat its
+            # best-effort result as an authorization proof. Ask conservatively
+            # for these recognized execution forms without invoking a model.
+            if name in {"npx", "bunx", "uvx"}:
+                return True
+            if name == "uv" and any(arg in {"run", "tool"} for arg in argv[1:]):
+                return True
+            if name in {"npm", "pnpm", "yarn"} and any(arg in {"exec", "x", "dlx"} for arg in argv[1:]):
+                return True
+            if name in SHELLS:
+                # -c payloads are recursively inspected by executable_texts.
+                if _shell_payload(argv) is None:
+                    return True
+            elif name.startswith("python") or name in interpreters or name in {"eval", "source", "."}:
+                return True
+            elif any(c in head for c in "$`") or head.startswith(".") or Path(head).suffix.lower() in {".py", ".js", ".ts", ".sh", ".rb", ".pl", ".ps1"}:
+                return True
+            elif "/" in head and not head.startswith(("/bin/", "/usr/bin/")):
+                return True
+    return False
+
+
 def gate_bash(data: dict) -> None:
+    """Enforcing approval boundary; no model verdict can emit host allow."""
+    global _FALLBACK
     from permission_gate import triage
 
     command = str((data.get("tool_input") or {}).get("command") or "")
     if not command.strip():
+        _FALLBACK = None
         return
-
-    def note(reason: str) -> None:
-        # Jev never prompts. A hook "ask" overrides the user's own allow rules, so its
-        # opinion goes to stderr (and the trace) and Claude Code's permission flow decides.
-        print(reason, file=sys.stderr)
-
-    # Local work (builds, tests, commits, installs, deletes inside the workspace)
-    # never reaches Jev. Claude Code's own permission rules decide everything
-    # except the irreversible, which is denied here.
-    kind, reason = triage(command)
+    kind, _reason = triage(command)
     if kind == "block":
-        _emit(_pre_tool("deny", f"jev: {reason}"))
+        _emit(_pre_tool("deny", "jev: deterministic command policy denies this action"))
+        _FALLBACK = None
+        return
+    if _opaque_execution(command):
+        _emit(_pre_tool("ask", "jev: opaque program execution requires approval"))
+        _FALLBACK = None
         return
     if kind == "local":
-        return
+        _FALLBACK = None
+        return  # host permissions remain authoritative
 
+    _FALLBACK = _pre_tool("ask", "jev: consequential action requires approval when evaluation is unavailable")
     if _looks_secret(command):
-        note("jev: command contains credential-shaped material; not sent to Jev")
+        _emit(_pre_tool("ask", "jev: sensitive command was not sent; approval required"))
+        _FALLBACK = None
         return
-
-    # Unconfigured is not an outage: leave the ordinary permission flow alone.
     if not _have_key():
+        _emit(_pre_tool("ask", "jev: no decision service configured; approval required"))
+        _FALLBACK = None
         return
 
-    from core import TransportError
     from permission_gate import gate
-
     try:
         d = gate(command, str(data.get("cwd") or "."))
-    except TransportError as exc:
-        note(f"jev unreachable ({exc})")
-        return
-
-    # A model verdict is judgement, not policy: it is recorded, never enforced. Only
-    # the deterministic layer above may `deny`. Nor do we say "allow": that would
-    # bypass the user's own permission rules.
-    final, reason = d.get("final"), d.get("reason", "")
-    if final in ("block", "review"):
-        note(f"jev: {final}: {reason}")
+        final = d.get("final") if isinstance(d, dict) else None
+        if final not in ("allow", "block", "review"):
+            _emit(_pre_tool("ask", "jev: invalid decision; approval required"))
+        elif final in ("block", "review"):
+            # The model cannot issue authoritative denial or consent. Human
+            # approval is a deterministic requirement for either adverse verdict.
+            _emit(_pre_tool("ask", "jev: decision flagged consequential action; approval required"))
+    except Exception:
+        # Never echo provider response bodies, commands or exception strings.
+        _emit(_pre_tool("ask", "jev: decision unavailable; approval required"))
+    _FALLBACK = None
 
 
 def _with_contract(tool_input: dict) -> dict | None:
@@ -238,7 +288,7 @@ def route_agent(data: dict) -> None:
 
     def contract_only(why: str) -> None:
         if changed:
-            _emit(_pre_tool("allow", f"jev: return contract added ({why})", tool_input))
+            _emit(_pre_tool(None, f"jev: return contract added ({why})", tool_input))
 
     if original.get("model"):
         contract_only("explicit model kept")
@@ -259,9 +309,9 @@ def route_agent(data: dict) -> None:
         # Recorded, so an outage or a malformed answer shows up in `report`
         # instead of looking like a subagent that simply was not routed.
         reason = "invalid_response" if isinstance(exc, InvalidResponse) else "transport_error"
-        write_trace("model_router", {"task": task[:MAX_TASK_CHARS]},
-                    {"selected": None, "fallback": reason, "error": str(exc)[:300]}, meta=meta)
-        print(f"jev route-agent: {reason} ({exc}); leaving model unset", file=sys.stderr)
+        write_trace("model_router", {"task_chars": len(task)},
+                    {"selected": None, "fallback": reason}, meta=meta)
+        print(f"jev route-agent: {reason}; leaving model unset", file=sys.stderr)
         contract_only("Jev unavailable")
         return
 
@@ -278,11 +328,12 @@ def route_agent(data: dict) -> None:
         f"confidence {confidence:.2f})" if isinstance(confidence, float)
         else f"jev_route_model: {selected}"
     )
-    _emit(_pre_tool("allow", reason, {**tool_input, "model": selected}))
+    _emit(_pre_tool(None, reason, {**tool_input, "model": selected}))
 
 
 def _join_keys(data: dict) -> dict:
-    return {k: str(data[k]) for k in ("tool_use_id", "session_id") if data.get(k)}
+    from privacy import safe_metadata
+    return {k: safe_metadata(str(data[k])) for k in ("tool_use_id", "session_id") if data.get(k)}
 
 
 def agent_outcome(data: dict) -> None:
@@ -398,7 +449,7 @@ def report(trace_dir: Path | None = None) -> dict:
 def session(data: dict) -> None:
     """SessionStart (startup, resume, clear, compact): say, in one line, what the hooks enforce."""
     routing = "subagents routed" if _have_key() else "routing off (no key)"
-    note = f"{HOOKS_ACTIVE}: Bash gated, {routing}, subagent return contract on."
+    note = f"{HOOKS_ACTIVE}: consequential Bash enforces deny/approval, {routing}, host permissions retained."
     _emit({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": note}})
 
 
@@ -452,7 +503,7 @@ def _skill_note(text: str, data: dict) -> str | None:
         project = data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
         return skill_router.note(skill_router.route_skill(text, project=project))
     except Exception as exc:  # a suggestion is never worth a failed prompt
-        print(f"jev skill router: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("jev skill router: unavailable", file=sys.stderr)
         return None
 
 
@@ -571,7 +622,7 @@ HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent
 FALLBACK = {
     "agent-outcome": None,
     "session": None,
-    "gate-bash": None,
+    "gate-bash": _pre_tool("ask", "jev: command validation unavailable; approval required"),
     "route-agent": None,
     "prompt": None,
 }
@@ -607,11 +658,15 @@ def main(argv: list[str] | None = None) -> None:
     _arm_budget(FALLBACK[args.cmd])
     try:
         data = _read_stdin()
-        if _bypassing(data):
-            _FALLBACK = None
         HANDLERS[args.cmd](data)
     except Exception as exc:  # a hook must never take the session down with it
-        print(f"jev {args.cmd}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"jev {args.cmd}: unavailable", file=sys.stderr)
+        if _FALLBACK is not None:
+            _emit(_FALLBACK)
+    finally:
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+        _FALLBACK = None
 
 
 if __name__ == "__main__":

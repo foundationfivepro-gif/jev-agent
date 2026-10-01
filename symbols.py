@@ -41,13 +41,15 @@ class Symbols:
     parse_ok: bool = True
     parser: str = ""
 
-    def index_entry(self, max_exports: int = 12) -> str:
+    def index_entry(self, max_exports: int = 12, *, include_docline: bool = False) -> str:
         """A compact pointer: what is in this file and what it is called."""
-        shown = self.exports[:max_exports]
+        from privacy import safe_metadata
+
+        shown = [safe_metadata(e) for e in self.exports[:max_exports]]
         more = len(self.exports) - len(shown)
-        parts = [self.path]
-        if self.docline:
-            parts.append(f" — {self.docline}")
+        parts = [safe_metadata(self.path)]
+        if include_docline and self.docline:
+            parts.append(f" — {safe_metadata(self.docline)}")
         if shown:
             tail = f" (+{more} more)" if more > 0 else ""
             parts.append(f"\n    exports: {', '.join(shown)}{tail}")
@@ -62,7 +64,7 @@ class Symbols:
 def _python(path: str, source: str) -> Symbols:
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+    except (SyntaxError, RecursionError, ValueError):
         return Symbols(path, "python", parse_ok=False, parser="ast")
 
     doc = (ast.get_docstring(tree) or "").strip().splitlines()
@@ -75,7 +77,9 @@ def _python(path: str, source: str) -> Symbols:
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id == "__all__":
                     try:
-                        explicit = [str(x) for x in ast.literal_eval(node.value)]
+                        values = ast.literal_eval(node.value)
+                        if isinstance(values, (list, tuple)):
+                            explicit = [x for x in values if isinstance(x, str) and x.isidentifier()]
                     except Exception:
                         pass
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -108,21 +112,39 @@ def _named_child(node, kinds: tuple[str, ...]):
     return None
 
 
+def _binding_names(node) -> list[str]:
+    """Identifiers only, never defaults, literals, computed keys or type source."""
+    kind = node.kind()
+    if kind in ("identifier", "shorthand_property_identifier_pattern"):
+        name = node.text()
+        return [name] if name.replace("$", "_").isidentifier() else []
+    children = node.children()
+    if kind in ("required_parameter", "optional_parameter", "assignment_pattern", "object_assignment_pattern", "rest_pattern"):
+        for child in children:
+            if child.kind() in ("identifier", "shorthand_property_identifier_pattern", "object_pattern", "array_pattern", "assignment_pattern", "rest_pattern"):
+                return _binding_names(child)
+        return []
+    if kind == "pair_pattern":
+        # The property on the left may be a string or computed expression. Only
+        # traverse the actual binding on the right, and never its initializer.
+        after_colon = False
+        for child in children:
+            if child.kind() == ":":
+                after_colon = True
+            elif after_colon:
+                return _binding_names(child)
+        return []
+    if kind in ("formal_parameters", "object_pattern", "array_pattern"):
+        return [name for child in children for name in _binding_names(child)][:32]
+    return []
+
+
 def _signature(decl) -> str:
-    """`verify(token, key)` from a function declaration, params without types."""
+    """`verify(token, key)` using binding identifiers, not parameter source."""
     name = _named_child(decl, ("identifier", "type_identifier"))
     label = name.text() if name else "?"
     params = _named_child(decl, ("formal_parameters",))
-    if not params:
-        return label
-    names: list[str] = []
-    for p in params.children():
-        if p.kind() in ("required_parameter", "optional_parameter"):
-            ident = _named_child(p, ("identifier", "object_pattern", "array_pattern"))
-            names.append(ident.text().split(":")[0].strip() if ident else "_")
-        elif p.kind() == "identifier":
-            names.append(p.text())
-    return f"{label}({', '.join(names)})"
+    return label if params is None else f"{label}({', '.join(_binding_names(params))})"
 
 
 def _typescript_astgrep(path: str, source: str, language: str) -> Symbols:
@@ -174,13 +196,7 @@ def _typescript_astgrep(path: str, source: str, language: str) -> Symbols:
                     if fn is not None:
                         params = _named_child(fn, ("formal_parameters",))
                         if params:
-                            names = []
-                            for p in params.children():
-                                if p.kind() in ("required_parameter", "optional_parameter"):
-                                    ident = _named_child(p, ("identifier", "object_pattern", "array_pattern"))
-                                    names.append(ident.text().split(":")[0].strip() if ident else "_")
-                                elif p.kind() == "identifier":
-                                    names.append(p.text())
+                            names = _binding_names(params)
                             exports.append(f"{n.text()}({', '.join(names)})")
                             continue
                     exports.append(n.text())
@@ -257,14 +273,18 @@ _LANGS.update({ext: _typescript for ext in _TS_LANG})
 
 
 def extract(path: str, source: str | None = None) -> Symbols:
-    """Symbols for one file. Unknown extensions get a first-line fallback."""
+    """Extract local symbols; implicit reads require an operator-approved root.
+
+    Source is never a metadata fallback for unknown languages. A caller can
+    inspect docline locally, but index_entry omits it by default.
+    """
     if source is None:
-        source = Path(path).read_text(encoding="utf-8", errors="replace")
+        from workspace_boundary import read_approved_text
+        path, source = read_approved_text(path)
+    if len(source.encode("utf-8")) > 1_000_000:
+        from workspace_boundary import WorkspaceError
+        raise WorkspaceError("file too large")
     fn = _LANGS.get(Path(path).suffix.lower())
     if fn:
         return fn(path, source)
-    first = next(
-        (l.strip() for l in source.splitlines() if l.strip() and not l.lstrip().startswith("#")),
-        "",
-    )
-    return Symbols(path, "other", [], first[:100], parse_ok=False, parser="none")
+    return Symbols(path, "other", [], "", parse_ok=False, parser="none")

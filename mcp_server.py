@@ -26,10 +26,11 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
+from decision_contracts import CommandSource
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mcp.server.mcpserver import MCPServer  # noqa: E402
+from safe_mcp import SafeMCPServer as MCPServer  # noqa: E402
 
 import canary  # noqa: E402
 from context_tier import Chunk, select  # noqa: E402
@@ -74,23 +75,9 @@ def _require_key() -> None:
 
 
 def _gather(root: Path, globs: list[str] | None) -> list[Path]:
-    patterns = globs or ["**/*"]
-    seen: dict[Path, None] = {}
-    for pattern in patterns:
-        for p in root.glob(pattern):
-            if not p.is_file():
-                continue
-            if SKIP_DIRS & set(p.parts):
-                continue
-            if globs is None and p.suffix.lower() not in CODE_SUFFIXES:
-                continue
-            try:
-                if p.stat().st_size > MAX_FILE_BYTES:
-                    continue
-            except OSError:
-                continue
-            seen[p] = None
-    return list(seen)
+    from workspace_boundary import configured_workspace
+    workspace = configured_workspace(root, max_bytes=MAX_FILE_BYTES)
+    return workspace.gather(globs, suffixes=CODE_SUFFIXES, skip_dirs=SKIP_DIRS)
 
 
 # --------------------------------------------------------------- output models
@@ -118,7 +105,7 @@ class CommandDecision(BaseModel):
     decision: Literal["allow", "review", "block"]
     reason: str = Field(description="Why this decision was reached.")
     binaries: list[str] = Field(description="Every binary the command line would execute.")
-    source: Literal["policy", "model", "unavailable"] = Field(
+    source: CommandSource = Field(
         description="'policy': a deterministic rule decided it; never run a policy block. "
                     "'model' or 'unavailable': advice only; the user's permission mode decides."
     )
@@ -126,6 +113,8 @@ class CommandDecision(BaseModel):
         default=None, description="Model-assigned probability the command is destructive."
     )
     impact: float | None = Field(default=None, description="0=none, 3=irreversible.")
+
+    schema_version: Literal["1.1"] = "1.1"
 
 
 class DataClassification(BaseModel):
@@ -187,6 +176,10 @@ class ModelRouteDecision(BaseModel):
         description="{'in': .., 'out': ..} USD per million tokens for `selected`."
     )
 
+    status: Literal["recommended", "no_eligible_model", "invalid_catalog", "invalid_request", "invalid_response"] = "recommended"
+    failure: Literal["no_eligible_model", "invalid_catalog", "invalid_request", "invalid_response"] | None = None
+    fallback: str | None = None
+
 
 class SkillRouteDecision(BaseModel):
     """Which one skill should handle a request, or 'none'."""
@@ -229,10 +222,13 @@ def jev_select_context(
     unfamiliar repository: scores paths and exported symbols (never contents) into
     read-in-full, index and ignore (188 files: 195k tokens -> 4k). Never read `index`.
     """
+    from privacy import screen_outbound
+    from workspace_boundary import WorkspaceError, configured_workspace
+
+    screen_outbound(goal)
+    workspace = configured_workspace(root, max_bytes=MAX_FILE_BYTES)
+    base = workspace.root
     _require_key()
-    base = Path(root).expanduser().resolve()
-    if not base.is_dir():
-        raise ValueError(f"root is not a directory: {base}")
 
     paths = _gather(base, globs)
     if not paths:
@@ -247,8 +243,12 @@ def jev_select_context(
     for i, p in enumerate(paths):
         cid = f"f{i}"
         rel = str(p.relative_to(base))
+        try:
+            source = workspace.read_text(rel)
+        except WorkspaceError:
+            continue  # never retry outside the descriptor-relative boundary
         by_id[cid] = rel
-        chunks.append(Chunk(cid, p.read_text(encoding="utf-8", errors="replace"), path=rel))
+        chunks.append(Chunk(cid, source, path=rel))
 
     try:
         packed = select(goal, chunks, budget=budget_tokens)
@@ -333,7 +333,7 @@ def jev_classify_data(
     Sensitivity of material and which providers may see it. Local, no model call.
     Call before sending file contents to a third party. `secret` means stop.
     """
-    label, reasons = classify(paths, content)
+    label, reasons = classify(paths, content, allow_inline_allowlist=False)
     name = LABEL_NAMES[label]
     allowed = {
         "public": ["local", "approved_cloud", "public_cloud"],
@@ -371,6 +371,8 @@ def jev_evaluate(
     tool covers. Not for prose or exact arithmetic. Booleans return a probability;
     choose the threshold by what being wrong costs.
     """
+    from privacy import screen_outbound
+    screen_outbound({"state": state, "questions": questions})
     _require_key()
     if not questions:
         raise ValueError("questions is empty")
@@ -421,16 +423,22 @@ def jev_file_outline(
     Exported symbols of files without loading them. Local, no model call. Use to
     decide whether a file is worth opening.
     """
+    from privacy import PrivacyError, safe_metadata, screen_outbound
+    from workspace_boundary import WorkspaceError, read_approved_text
+
+    if len(paths) > 2000:
+        raise WorkspaceError("scan limit exceeded")
     out: dict[str, str] = {}
-    for raw in paths:
-        p = Path(raw).expanduser()
-        if not p.is_file():
-            out[raw] = "[not a file]"
-            continue
+    for i, raw in enumerate(paths):
+        key = safe_metadata(raw)
+        if key == "[redacted]":
+            key = f"[withheld path {i}]"
         try:
-            out[raw] = extract_symbols(str(p), p.read_text(encoding="utf-8", errors="replace")).index_entry()
-        except Exception as exc:
-            out[raw] = f"[unreadable: {type(exc).__name__}]"
+            relative, source = read_approved_text(raw, max_bytes=MAX_FILE_BYTES)
+            screen_outbound(source)
+            out[key] = extract_symbols(relative, source).index_entry()
+        except (WorkspaceError, PrivacyError):
+            out[key] = "[unavailable: privacy or workspace boundary]"
     return out
 
 
@@ -536,7 +544,7 @@ def jev_route_model(
     if not task.strip():
         raise ValueError("task is empty")
 
-    cat = catalog or DEFAULT_CATALOG
+    cat = DEFAULT_CATALOG if catalog is None else catalog
     try:
         d = route_model(task, catalog=cat)
     except TransportError as exc:
@@ -545,7 +553,8 @@ def jev_route_model(
 
     chosen = cat.get(d["selected"], {})
     return ModelRouteDecision(
-        selected=d["selected"],
+        selected=d["selected"], status=d.get("status", "recommended"),
+        failure=d.get("failure"), fallback=d.get("fallback"),
         model_id=chosen.get("id"),
         proposed=None if d.get("proposed") is None else str(d["proposed"]),
         confidence=round(float(d.get("confidence", 0.0)), 3),
@@ -586,6 +595,10 @@ def _skill_decision(d: dict, note: str | None) -> SkillRouteDecision:
         selected=d["selected"], proposed=d.get("proposed"), confidence=d["confidence"],
         reason=d["reason"], source=d["source"], note=note, latency_ms=d["latency_ms"],
     )
+
+
+from portability_tools import register_portability_tools
+register_portability_tools(mcp)
 
 
 if __name__ == "__main__":

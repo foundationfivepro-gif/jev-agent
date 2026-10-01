@@ -161,15 +161,17 @@ def _value_looks_like_a_secret(value: str) -> bool:
     return len(value) >= 16 or (len(value) >= 8 and (has_digit or mixed_case))
 
 
-def classify(files: Sequence[str], text: str = "") -> tuple[int, list[str]]:
+def classify(files: Sequence[str], text: str = "", *, allow_inline_allowlist: bool = True) -> tuple[int, list[str]]:
     """
     Return (label, reasons). Fails closed: anything credential-shaped is SECRET.
 
     `text` is scanned but never returned, logged, or forwarded. Lines marked
-    `pragma: allowlist secret` are skipped.
+    `pragma: allowlist secret` are skipped only for local diagnostics when
+    allow_inline_allowlist=True. Every outbound boundary disables this escape hatch.
     """
     reasons: list[str] = []
-    text = _scannable(text)
+    if allow_inline_allowlist:
+        text = _scannable(text)
 
     for pattern, label in SECRET_PATTERNS:
         if re.search(pattern, text):
@@ -183,21 +185,25 @@ def classify(files: Sequence[str], text: str = "") -> tuple[int, list[str]]:
     for f in files:
         low = f.lower()
         if any(h in low for h in SECRET_PATH_HINTS):
-            reasons.append(f"path: {f} looks like credential storage")
+            reasons.append("path: credential storage indicator")
     if reasons:
         return SECRET, reasons
 
     blob = _high_entropy_blob(text)
     if blob:
-        return SECRET, [f"content: high-entropy blob ({blob})"]
+        return SECRET, ["content: high-entropy blob"]
+
+    from privacy import contains_personal_data
+    if contains_personal_data(text):
+        return CUSTOMER, ["content: personal data indicator"]
 
     for f in files:
         low = f.lower()
         if any(h in low for h in CUSTOMER_PATH_HINTS):
-            return CUSTOMER, [f"path: {f} suggests customer data"]
+            return CUSTOMER, ["path: customer data indicator"]
     for f in files:
         if any(h in f for h in INTERNAL_PATH_HINTS):
-            return INTERNAL, [f"path: {f} is internal source"]
+            return INTERNAL, ["path: internal source"]
     return PUBLIC, ["no sensitive indicators found"]
 
 
@@ -218,7 +224,15 @@ def security_route(goal: str, files: Sequence[str], raw_text: str = "") -> dict:
     decision is made entirely in code. Everything else is filtered to the
     eligible set first, so Jev is only ever choosing between legal options.
     """
-    label, reasons = classify(files, raw_text)
+    from privacy import PrivacyError, safe_metadata, screen_outbound
+
+    label, reasons = classify(files, raw_text, allow_inline_allowlist=False)
+    files = [safe_metadata(f) for f in files]
+    try:
+        screen_outbound({"goal": goal, "files": files})
+    except PrivacyError:
+        label, reasons = SECRET, ["metadata: sensitivity screening failed"]
+    goal = safe_metadata(goal, max_chars=4000)
 
     if label == SECRET:
         decision = {
@@ -247,6 +261,7 @@ def security_route(goal: str, files: Sequence[str], raw_text: str = "") -> dict:
     criteria = {k: v["fit"] for k, v in eligible.items()}
     criteria["human"] = "None of these is appropriate; escalate to a person"
 
+    screen_outbound(state)
     result = decide(state, {
         "provider": Choice(
             instructions="Which permitted provider is the best fit for this work?",
@@ -254,7 +269,7 @@ def security_route(goal: str, files: Sequence[str], raw_text: str = "") -> dict:
         )
     })
     answer = result.answers["provider"]
-    selected = str(answer.value) if answer.certainty >= 0.85 else "human"
+    selected = str(answer.value) if answer.certainty >= 0.85 and answer.value in criteria else "human"
 
     decision = {
         "selected": selected,

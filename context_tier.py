@@ -25,12 +25,13 @@ called anywhere in this module.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
 import canary
 from core import Noul, Decision, decide_batched, write_trace
 from symbols import extract
+from privacy import PrivacyError, safe_metadata, screen_outbound
 
 # Below this, indexing costs more than including — never index a small chunk.
 MIN_INDEX_TOKENS = 500
@@ -115,6 +116,8 @@ def select(
     index_at: float = INDEX_AT,
     strict_canary: bool = True,
     refine_top: int = 25,
+    authorized_snippet_ids: frozenset[str] = frozenset(),
+    snippet_chars: int = 200,
 ) -> Packed:
     """
     Score every chunk against `goal` and pack the context.
@@ -126,14 +129,37 @@ def select(
     `refine_top` re-scores that many leading candidates in a single call so the
     boundary decisions are made on comparable numbers; set it to 0 to skip.
     """
+    screen_outbound(goal)
     if not chunks:
         return Packed()
+    if not isinstance(snippet_chars, int) or not 0 <= snippet_chars <= 200:
+        raise ValueError("snippet_chars must be between 0 and 200")
+    # Explicit snippets are a trusted-caller API only. The MCP tool exposes no
+    # knob that could turn request text into destination/content authorization.
+    screened: list[Chunk] = []
+    withheld: list[str] = []
+    for c in chunks:
+        cid = safe_metadata(c.id)
+        path = safe_metadata(c.path)
+        try:
+            screen_outbound(c.text)
+            if cid != c.id or path != c.path:
+                raise PrivacyError()
+        except PrivacyError:
+            if c.pinned:
+                raise PrivacyError() from None
+            withheld.append(cid)
+            continue
+        screened.append(replace(c, id=cid, path=path))
+    scored_chunks = [c for c in screened if not c.pinned]
+    pinned = [c for c in screened if c.pinned]
+    if not scored_chunks:
+        return Packed(included=pinned, excluded=withheld,
+                      tokens_in=sum(c.tokens for c in chunks),
+                      tokens_out=sum(c.tokens for c in pinned))
 
-    scored_chunks = [c for c in chunks if not c.pinned]
-    pinned = [c for c in chunks if c.pinned]
-
-    # Score over cheap material: path, symbols and a short head — never whole
-    # file bodies. Feeding the corpus in to decide what to read defeats the point.
+    # Only sanitized path and parser-derived symbols cross the default boundary.
+    # No docstrings, source heads or unknown-language first-line fallbacks.
     state_chunks: dict[str, dict] = {}
     questions: dict[str, Noul] = {}
     for c in scored_chunks:
@@ -141,14 +167,16 @@ def select(
         state_chunks[c.id] = {
             "path": c.path or c.id,
             "kind": c.kind,
-            "symbols": sym.exports[:10] if sym else [],
-            "head": c.text[:200],
+            "symbols": [safe_metadata(e) for e in sym.exports[:10]] if sym else [],
         }
+        if c.id in authorized_snippet_ids:
+            state_chunks[c.id]["snippet"] = screen_outbound(c.text[:snippet_chars])
+        screen_outbound(state_chunks[c.id])
         questions[c.id] = _question(c.id)
 
     for probe in (canary.CANARY_RELEVANT, canary.CANARY_IRRELEVANT):
         state_chunks[probe["id"]] = {"path": probe["id"], "kind": "file",
-                                     "symbols": [], "head": probe["text"]}
+                                     "symbols": [], "synthetic_probe": probe["text"]}
         questions[probe["id"]] = _question(probe["id"])
 
     # Slice the state per batch: each call carries only the chunks its own
@@ -156,7 +184,7 @@ def select(
     # every batch is the dominant cost and, past a few thousand tokens, a 503.
     def state_for(ids):
         keep = set(ids) | set(canary.CANARY_IDS)
-        return {"goal": goal, "chunks": {k: v for k, v in state_chunks.items() if k in keep}}
+        return screen_outbound({"goal": goal, "chunks": {k: v for k, v in state_chunks.items() if k in keep}})
 
     result: Decision = decide_batched(state_for, questions)
 
@@ -186,6 +214,7 @@ def select(
             "goal": goal,
             "chunks": {cid: state_chunks[cid] for cid in short_ids + list(canary.CANARY_IDS)},
         }
+        screen_outbound(refine_state)
         refine_questions = {cid: questions[cid] for cid in short_ids + list(canary.CANARY_IDS)}
         try:
             refined = decide_batched(lambda _ids: refine_state, refine_questions)
@@ -202,7 +231,7 @@ def select(
                 probe_result.detail + f" | refine pass skipped: {type(exc).__name__}",
             )
 
-    packed = Packed(scores=scores, canary=probe_result.detail)
+    packed = Packed(scores=scores, canary=probe_result.detail, excluded=withheld)
     packed.tokens_in = sum(c.tokens for c in chunks)
 
     for c in pinned:                       # the request always goes in first
@@ -230,7 +259,7 @@ def select(
     packed.tokens_out = used
     write_trace(
         "context_tier",
-        {"goal": goal, "chunk_ids": [c.id for c in chunks]},
+        {"chunk_ids": [safe_metadata(c.id) for c in chunks]},
         {
             "included": [c.id for c in packed.included],
             "indexed": len(packed.indexed),

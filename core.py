@@ -45,6 +45,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 # Question types only — the SDK client is intentionally unused (see module docstring).
 from typesafe_sdk import Choice, Noul, RetryPolicy, Score
+from privacy import screen_outbound, sanitize_for_storage
 
 __all__ = [
     "Choice", "Noul", "Score",          # re-exported so modules import one place
@@ -163,7 +164,7 @@ def unreachable(exc: Exception, fallback: str) -> ValueError:
     improvisation is to stop: silence read as the safe answer. Every MCP
     tool that cannot supply its own default says which one applies.
     """
-    return ValueError(f"Jev unreachable: {exc}. Fallback: {fallback}")
+    return ValueError(f"Jev unreachable: {sanitize_for_storage(str(exc))}. Fallback: {fallback}")
 
 
 # Appended to questions whose state carries text a user or a repository wrote:
@@ -325,15 +326,33 @@ def _validate(wire: Mapping[str, dict], body: Any) -> None:
                 _check_distribution(qid, a["probabilities"], None)
 
 
+class _NoDecisionRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Redirecting an authenticated POST can forward credentials to another
+        # origin and changes the approved decision destination. Fail closed.
+        return None
+
+
+def _open_decision_request(request, *, timeout):
+    return urllib.request.build_opener(_NoDecisionRedirects()).open(request, timeout=timeout)
+
+
 def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
     key_var, url, model, noul_type = TRANSPORTS[transport]
+    from urllib.parse import urlsplit
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment):
+        raise TransportError("unsafe upstream endpoint configuration")
     key = os.environ[key_var]
     wire = _questions_to_wire(questions, noul_type)
     if transport == "openrouter":
         for q in wire.values():
             if q["type"] == "noul" and "instructions" not in q:
                 q["instructions"] = NOUL_BY_CRITERIA
-    payload = json.dumps({"model": model, "state": state, "questions": wire}).encode()
+    # Screen the complete wire state and questions before any retry buffer exists.
+    screen_outbound({"state": state, "questions": wire})
+    payload = json.dumps({"model": model, "state": state, "questions": wire}, allow_nan=False).encode()
     started = time.monotonic()
     answered = False
 
@@ -348,25 +367,27 @@ def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=min(RETRY.timeout, remaining)) as resp:
+            with _open_decision_request(req, timeout=min(RETRY.timeout, remaining)) as resp:
                 body = json.loads(resp.read())
             answered = True
             break
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:300]
+            # Upstream errors can echo user input, headers or credentials.
+            # Never retain their raw body in diagnostics.
+            detail = "upstream request rejected"
             retryable = exc.code in (408, 429, 500, 502, 503, 504, 529)
             last = TransportError(f"{transport} {exc.code}: {detail}")
             if not retryable or attempt == RETRY.max_retries:
-                raise last from exc
+                raise last from None
             wait = float(exc.headers.get("retry-after") or 0) or min(
                 RETRY.backoff_initial * 2**attempt, RETRY.backoff_max
             )
         except OSError as exc:
             # URLError, and a timeout raised mid-read, which urllib does not wrap:
             # both mean no answer, and callers only catch TransportError.
-            last = TransportError(f"{transport} unreachable: {getattr(exc, 'reason', exc)}")
+            last = TransportError(f"{transport} unreachable ({type(exc).__name__})")
             if attempt == RETRY.max_retries:
-                raise last from exc
+                raise last from None
             wait = min(RETRY.backoff_initial * 2**attempt, RETRY.backoff_max)
         wait = min(wait, RETRY.backoff_max)
         if wait >= DEADLINE_S - (time.monotonic() - started):
@@ -382,6 +403,7 @@ def _call(transport: str, state: Any, questions: Mapping[str, Any]) -> Decision:
         )
 
     latency_ms = int((time.monotonic() - started) * 1000)
+    screen_outbound(body)
     _validate(wire, body)
     answers: dict[str, Answer] = {}
     for qid, a in (body.get("answers") or {}).items():
@@ -534,6 +556,10 @@ def write_trace(
         "result": result,
         **({"meta": dict(meta)} if meta else {}),
     }
+    payload = sanitize_for_storage(payload)
+    # The caller-selected trace label is not a filesystem path.
+    import re
+    system = re.sub(r"[^a-zA-Z0-9_-]", "_", str(payload.get("system", "decision")))[:64] or "decision"
     TRACE_DIR.mkdir(parents=True, exist_ok=True)
     stamp = payload["time"][:19].replace(":", "")
     path = TRACE_DIR / f"{system}-{stamp}-{payload['state_hash'][:8]}.json"

@@ -21,7 +21,9 @@ encoding a verdict. Run it with your own numbers before trusting either answer.
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 from typing import Mapping
 
 from core import UNTRUSTED, Choice, Score, decide, write_trace
@@ -74,7 +76,54 @@ def available_catalog(catalog: Mapping[str, Mapping] = DEFAULT_CATALOG) -> dict[
     """
     wanted = {m.strip().lower() for m in os.environ.get("JEV_MODELS", "").split(",") if m.strip()}
     menu = {k: dict(v) for k, v in catalog.items() if not wanted or k in wanted}
-    return menu or {k: dict(v) for k, v in catalog.items()}
+    # Empty is evidence of no eligible model, never permission to restore models
+    # the operator excluded (including a misspelled allowlist).
+    return menu
+
+
+_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"})
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/~-]{0,199}$")
+
+
+def _finite_nonnegative(value) -> bool:
+    try:
+        return (not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) and value >= 0)
+    except OverflowError:
+        return False
+
+
+def validate_catalog(catalog: Mapping[str, Mapping]) -> None:
+    """Validate all candidates before filtering or constructing outbound state."""
+    if not isinstance(catalog, Mapping) or len(catalog) > 64:
+        raise ValueError("invalid model catalog")
+    for name, model in catalog.items():
+        if (not isinstance(name, str) or not _MODEL_NAME.fullmatch(name) or name == "human"
+                or not isinstance(model, Mapping)):
+            raise ValueError("invalid model candidate")
+        if not isinstance(model.get("fit"), str) or not 0 < len(model["fit"]) <= 4000:
+            raise ValueError("invalid model fit")
+        if any(not _finite_nonnegative(model.get(cost)) for cost in ("cost_in", "cost_out")):
+            raise ValueError("model costs must be finite and nonnegative")
+        if isinstance(model.get("tier"), bool) or not isinstance(model.get("tier"), int) or model["tier"] < 1:
+            raise ValueError("model tier must be a positive integer")
+        if "id" in model and (not isinstance(model["id"], str) or not _MODEL_NAME.fullmatch(model["id"])):
+            raise ValueError("invalid executable model ID")
+        for flag in ("browser", "escalation_only"):
+            if flag in model and not isinstance(model[flag], bool):
+                raise ValueError("invalid model control")
+        if "efforts" in model:
+            efforts = model["efforts"]
+            if (not isinstance(efforts, (list, tuple)) or len(efforts) > len(_EFFORTS)
+                    or any(not isinstance(e, str) or e not in _EFFORTS for e in efforts)
+                    or len(set(efforts)) != len(efforts)):
+                raise ValueError("invalid model efforts")
+
+
+def _failure(status: str) -> dict:
+    # Keep the legacy safe sentinel while exposing the machine-readable reason.
+    return {"selected": "human", "reason": status.replace("_", " "), "source": "policy",
+            "fallback": status, "status": status, "failure": status}
 
 
 def estimate_costs(
@@ -87,6 +136,12 @@ def estimate_costs(
     Returns per-model totals plus the delegated total, so a caller can see
     whether routing actually pays at *their* prices and context size.
     """
+    validate_catalog(catalog)
+    if not catalog:
+        return {"status": "no_eligible_model", "failure": "no_eligible_model", "pure": {},
+                "delegated": None, "delegation_wins": False, "cheapest_pure": None}
+    if any(not _finite_nonnegative(v) for v in (context_mtok, output_mtok, tool_mtok)):
+        raise ValueError("token volumes must be finite and nonnegative")
     names = sorted(catalog, key=lambda k: catalog[k]["tier"])
     # The comparison is against the model the router actually falls back to,
     # so escalation-only tiers are not the benchmark.
@@ -103,6 +158,8 @@ def estimate_costs(
         + cheap["cost_in"] * tool_mtok           # cheap model reads tool output
         + strong["cost_in"] * (output_mtok + tool_mtok)   # strong model re-reads the result
     )
+    if not math.isfinite(delegated) or any(not math.isfinite(cost) for cost in pure.values()):
+        raise ValueError("estimated cost overflow")
     best_pure = min(pure, key=pure.get)
     return {
         "pure": pure,
@@ -139,13 +196,19 @@ def route_model(
     None when Jev's proposal was taken. `trace_meta` is stored with the trace
     (hooks pass `tool_use_id`) so the subagent's outcome can be joined to it.
     """
+    try:
+        validate_catalog(catalog)
+    except (ValueError, TypeError):
+        return _failure("invalid_catalog")
+    if (not _finite_nonnegative(max_cost_in) or not _finite_nonnegative(min_confidence)
+            or min_confidence > 1 or not isinstance(needs_browser, bool)):
+        return _failure("invalid_request")
     eligible = {
         k: v for k, v in catalog.items()
         if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
     }
     if not eligible:
-        decision = {"selected": "human", "reason": "no eligible model", "source": "policy",
-                    "fallback": "no_eligible_model"}
+        decision = _failure("no_eligible_model")
         write_trace("model_router", {"task": task}, decision, meta=trace_meta)
         return decision
 
@@ -165,7 +228,38 @@ def route_model(
                             criteria=["mechanical", "standard", "multi-step", "frontier"]),
     })
 
-    answer = result.answers["model"]
+    try:
+        answer = result.answers["model"]
+        proposed = answer.value
+        complexity = result.value("complexity")
+        if (not isinstance(proposed, str) or proposed not in criteria
+                or not _finite_nonnegative(answer.certainty) or answer.certainty > 1
+                or (complexity is not None and
+                    (not _finite_nonnegative(complexity) or complexity > 3))):
+            return _failure("invalid_response")
+        probabilities = answer.probabilities
+        if probabilities is not None:
+            if not isinstance(probabilities, Mapping):
+                return _failure("invalid_response")
+            if any(k not in criteria or not _finite_nonnegative(p) or p > 1
+                   for k, p in probabilities.items()):
+                return _failure("invalid_response")
+            if probabilities and not math.isclose(sum(probabilities.values()), 1, abs_tol=1e-3):
+                return _failure("invalid_response")
+            if probabilities and (proposed not in probabilities or
+                                  probabilities[proposed] < max(probabilities.values())):
+                return _failure("invalid_response")
+        # Legacy requests do not offer an effort question. If an injected or
+        # changed decision source nevertheless returns one, validate it rather
+        # than quietly forwarding an unsupported executor parameter.
+        effort_answer = result.answers.get("effort")
+        if effort_answer is not None:
+            effort = effort_answer.value
+            if (not isinstance(effort, str) or effort not in _EFFORTS or proposed not in eligible
+                    or effort not in eligible[proposed].get("efforts", ())):
+                return _failure("invalid_response")
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return _failure("invalid_response")
     # Fail closed toward capability: an uncertain route goes to the strongest
     # tier Jev seriously considered (see MIN_FALLBACK_MASS), because a cheap
     # failure costs the cheap attempt plus the expensive retry plus the latency
@@ -173,8 +267,6 @@ def route_model(
     # uncertainty is not a reason to pay double.
     ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
     strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
-    proposed = str(answer.value)
-    complexity = result.value("complexity")
 
     threshold = min_confidence
     if (

@@ -1,5 +1,22 @@
 # jev-agent
 
+> **Offline portability preparation (not deployed).** This isolated change adds
+> mock-only writing tools and host-aware recommendations. Live provider generation,
+> live dispatch, OAuth grants, deployment, paid tests, and connected-host support
+> remain disabled/unverified. Existing historical measurement claims below do not
+> describe results of this change. See [PORTABILITY.md](PORTABILITY.md).
+
+## Codex JEV-required routing
+
+The [Codex skill](.agents/skills/codex-jev-routing/SKILL.md) requires a JEV routing
+record before every new adapter-controlled model request. Clear writing and
+explicit model choices still require selection; local non-model operations can
+use a named, sanitized exception. No selector means blocked, not fallback.
+Host-exposed controls and permissions remain authoritative, and no current-chat
+or installed-Claude activation is claimed. This is the 1 October policy,
+superseding the earlier selective/direct-routing proposal.
+
+
 Jev decision modules, built on the official `typesafe-sdk`. Jev is the **only**
 external model — every other step is deterministic code.
 
@@ -209,10 +226,9 @@ Then in Claude: **Customize → Connectors → Add custom connector**, URL
 `https://<host>/mcp`, authentication **No sign-in**, and under **Request
 headers** set `authorization` to `Bearer <your JEV_REMOTE_TOKEN>`.
 
-If your organisation lacks the request-headers beta, use the URL form
-`https://<host>/t/<token>/mcp` instead. That puts a credential in a URL, where
-it lands in logs and history — prefer the header, and treat a path token as
-disposable.
+Credential-in-URL paths and query parameters are now rejected. Use the header
+transport for the existing decision service. The new OAuth boundary is an offline
+prototype only; do not create production grants or treat it as deployed auth.
 
 `GET /health` is unauthenticated and reports whether the key and token are set.
 **With no `JEV_REMOTE_TOKEN` the server refuses every request** rather than
@@ -268,10 +284,12 @@ All ten systems from the engineering guide, plus the runtime they share.
 | `control_loop.py` | assemble and gate the execution packet | — |
 | `hooks.py` | Claude Code hook adapters: prompt evaluation, Bash gate, subagent routing | Jev |
 
-`python -m pytest tests/ -q` — 85 tests, 78 of which need no key. Two of them are
+`python scripts/offline_tests.py` runs the full credential-free suite with external
+sockets denied, including Python subprocesses. The pinned baseline was 304 passed
+and 7 live tests skipped; consult the generated test report for current counts. Two of them are
 integration guards: every MCP tool must import from a real module, and every tool
 must be named in a skill. The hook tests run `hooks.py` as a subprocess with no key
-and an absent env file, so they prove the hard block and the fail-silent paths
+and an absent env file, so they prove the hard block and the explicit approval-required paths
 without touching the network. A capability no skill describes is one the agent never
 thinks to call, which is the difference between code being *in* the repo and
 being *merged* into it.

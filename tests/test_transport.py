@@ -37,7 +37,7 @@ def _capture(monkeypatch, reply):
         seen.append((req.full_url, dict(req.header_items()), json.loads(req.data)))
         return _Resp(json.dumps(reply).encode())
 
-    monkeypatch.setattr(core.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(core, "_open_decision_request", urlopen)
     return seen
 
 
@@ -123,7 +123,7 @@ def test_http_errors_name_the_transport(monkeypatch):
     def refuse(req, timeout):
         raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"error":"bad key"}'))
 
-    monkeypatch.setattr(core.urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(core, "_open_decision_request", refuse)
     with pytest.raises(TransportError, match="typesafe 401"):
         decide("x", {"urgent": QUESTIONS["urgent"]})
 

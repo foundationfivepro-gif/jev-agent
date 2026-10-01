@@ -1,43 +1,41 @@
 # jev-agent defaults
 
-When the hooks are running, a session-start note says `jev hooks active`. They then run
-Jev on every outbound Bash command and every subagent spawn; do not repeat those calls by hand,
-since each is a tool round-trip in your context plus a second Jev call. With no such note
-(Cowork, claude.ai, a machine without the hooks), make those calls yourself.
+A session-start note says `jev hooks active` when hooks run. They gate recognized
+outbound Bash commands and route subagent spawns. Do not duplicate those calls.
+Without that note, call the tools yourself; host permissions always apply.
 
 ## Call these yourself
 
-- **Before reading files to find something:** `jev_select_context`. Read only `include`;
-  never read `index`.
-- **Before sending file contents to a third party:** `jev_classify_data`. `secret` means stop.
-- **Before an action with external effect** (send, post, delete, pay, deploy):
-  `jev_check_action`.
+- Before finding repository files: `jev_select_context`. Read only `include`, not
+  `index`. Local reads require operator-approved workspace roots.
+- Before sharing content: `jev_classify_data`. `secret` means stop; a classification
+  never grants consent to transmit.
+- Before external effects (send, post, delete, pay, deploy): `jev_check_action`.
 
-## With `jev hooks active`, the hooks do these
+## With `jev hooks active`
 
-- **Bash**: outbound commands reach Jev, which never prompts; only its `deny` stands.
-- **Agent spawns** without a `model` are routed by `jev_route_model`, and every subagent
-  prompt gets a return contract (conclusion only, file:line references). Set `model`
-  yourself only when you know better; the hook keeps it.
+- Bash: irreversible deterministic rules deny. Model block/review, unavailable
+  service and errors ask. Opaque interpreter/script execution asks without a model
+  call. Model allow stays silent; it cannot override host permission.
+- Agent spawns without `model` use `jev_route_model`. Explicit models stay intact.
+  Every subagent gets a compact return contract with conclusions and file:line refs.
 
-## Without it, do them yourself
+## Without hooks
 
-- Before an outbound command (push, curl, deploy): `jev_gate_command`.
-  Never run a `policy` block; a model verdict is advice to the permission mode.
-- Before delegating: `jev_route_model`; use `selected` as the model (`human`: don't
-  delegate), and end the subagent prompt by asking for the conclusion only.
+- Before an outbound command: `jev_gate_command`. Never execute a policy block;
+  block/review or unavailable outcomes require host approval.
+- Before delegating: `jev_route_model`; `human` means do not delegate.
 
-## Delegating
+## Delegation
 
-- Delegate on **compression ratio, not difficulty**: a subagent that reads a lot and
-  returns a few sentences pays; one whose output you must re-read does not. Do that inline.
-- Do not delegate what is already in your context.
-- Fable is escalation-only. Do not pick it, and do not second-guess the router downward.
+Delegate when much inspection produces a small result. Keep available parent
+context inline. Fable remains escalation-only, never an uncertain fallback.
 
-Prompt text and command lines go to Jev (TypeSafe's API); anything credential-shaped
-is held back locally.
+Only screened prompts and command metadata reach the configured Jev decision
+route (OpenRouter by default). Source contents stay local by default. Detection
+is defense in depth, not consent. Arbitrary programs still need the host sandbox.
 
 ## Verify
 
-`python -m pytest tests/ -q`. Every MCP tool must import from a real module and be named
-in a skill.
+`python scripts/offline_tests.py` runs without credentials or external sockets.
+Every tool must import a real module and be named in a skill.

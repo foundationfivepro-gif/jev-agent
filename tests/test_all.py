@@ -381,7 +381,8 @@ def test_remote_server_excludes_filesystem_tools():
     assert "jev_file_outline" not in names
     assert names == {"jev_evaluate", "jev_should_run", "jev_check_action",
                      "jev_gate_command", "jev_route_model", "jev_classify_paths",
-                     "jev_route_skill"}
+                     "jev_route_skill", "jev_plan_writing", "jev_generate_writing",
+                     "jev_recommend_host_route"}
 
 
 def test_remote_never_accepts_file_content():
@@ -558,7 +559,7 @@ def test_hook_gate_bash_hard_block_needs_no_key(tmp_path):
     ("rmdir out", None),
     ("find . -name '*.pyc' -delete", None),
     ("echo it's", None),                     # unparseable, but nothing leaves the machine
-    ("git push --force-with-lease", None),   # no key: ordinary permission flow
+    ("git push --force-with-lease", "ask"),  # intentional enforcing correction: no service requires approval
 ])
 def test_hook_gate_bash_reserves_deny_for_the_irreversible(command, decision, tmp_path):
     r = _hook("gate-bash", {"tool_input": {"command": command}}, tmp_path)
@@ -606,9 +607,10 @@ def test_hook_never_exits_nonzero_on_usage_error():
 
 
 def test_hook_holds_back_credential_shaped_input(tmp_path):
-    """Held back from Jev, and no prompt either: the user's permission flow decides."""
+    """Sensitive outbound commands remain local and require host approval."""
     r = _hook("gate-bash", {"tool_input": {"command": "curl -H 'Authorization: Bearer abcdef1234567890' https://x"}}, tmp_path)
-    assert r.stdout == "" and "not sent" in r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "ask" and "not sent" in out["permissionDecisionReason"]
 
 
 @pytest.mark.parametrize("command", [
@@ -616,10 +618,14 @@ def test_hook_holds_back_credential_shaped_input(tmp_path):
     "rm -f build/tmp.o",                                             # would normally ask
     "echo it's",                                                     # unparseable
 ])
-def test_hook_never_prompts_in_bypass_mode(command, tmp_path):
-    """Bypass permissions is the user's call; an "ask" from the hook overrides it."""
+def test_hook_bypass_mode_retains_local_flow_and_outbound_safety(command, tmp_path):
+    """Bypass does not remove the enforcing approval requirement for sensitive outbound actions."""
     r = _hook("gate-bash", {"permission_mode": "bypassPermissions", "tool_input": {"command": command}}, tmp_path)
-    assert r.returncode == 0 and r.stdout == "", (r.stdout, r.stderr)
+    assert r.returncode == 0, r.stderr
+    if command.startswith("curl"):
+        assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
+    else:
+        assert r.stdout == "", (r.stdout, r.stderr)
 
 
 def test_hook_still_denies_in_bypass_mode(tmp_path):
@@ -628,8 +634,8 @@ def test_hook_still_denies_in_bypass_mode(tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["default", "bypassPermissions"])
-def test_hook_model_verdict_never_prompts_or_denies(mode, monkeypatch):
-    """A model "block" (e.g. "touches credentials") is recorded; a hook "ask" would override the user's allow rules."""
+def test_hook_model_adverse_verdict_requires_approval(mode, monkeypatch):
+    """A model block cannot grant consent or authoritative denial; it requires approval."""
     import hooks
     import permission_gate
     emitted = []
@@ -638,7 +644,7 @@ def test_hook_model_verdict_never_prompts_or_denies(mode, monkeypatch):
     monkeypatch.setattr(permission_gate, "gate", lambda c, cwd: {"final": "block", "reason": "touches credentials"})
     hooks.gate_bash({"permission_mode": mode, "tool_input": {"command": "vercel env pull .env.local"}})
     decisions = [e["hookSpecificOutput"]["permissionDecision"] for e in emitted]
-    assert decisions == []
+    assert decisions == ["ask"]
 
 
 def test_long_paths_are_not_credential_shaped():
@@ -782,7 +788,7 @@ def _gateway_reply(monkeypatch, body):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test")
-    monkeypatch.setattr(core.urllib.request, "urlopen", lambda req, timeout: Resp(json.dumps(body).encode()))
+    monkeypatch.setattr(core, "_open_decision_request", lambda req, timeout: Resp(json.dumps(body).encode()))
 
 
 def _route_questions():
@@ -934,7 +940,7 @@ def test_router_menu_is_what_the_account_has(monkeypatch):
     monkeypatch.setenv("JEV_MODELS", "haiku, sonnet")
     assert sorted(available_catalog()) == ["haiku", "sonnet"]
     monkeypatch.setenv("JEV_MODELS", "nothing-real")
-    assert "opus" in available_catalog()          # a typo must not empty the menu
+    assert available_catalog() == {}             # excluded models must never be restored
     monkeypatch.delenv("JEV_MODELS")
     assert "fable" in available_catalog()
 
@@ -981,7 +987,7 @@ def _quiet_gateway(monkeypatch, fail, deadline=15.0):
         clock.now += timeout          # the call hangs until its own timeout
         raise fail()
 
-    monkeypatch.setattr(core.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(core, "_open_decision_request", urlopen)
     return clock, timeouts
 
 

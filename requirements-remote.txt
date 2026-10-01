@@ -4,6 +4,6 @@
 # filesystem tools, so the parser is dead weight in a serverless bundle —
 # verified by importing remote_server and checking what actually loads.
 typesafe-sdk==0.7.1
-mcp>=1.2
+mcp==2.2.0  # MCPServer and safe_mcp use the verified 2.x API
 starlette>=0.37
 uvicorn>=0.30
