@@ -16,9 +16,10 @@ delegated = small_in·X + small_out·Y + small_in·Z + big_in·(Y + Z)
 
 The forgotten term is the last: a delegate's output does not land in the parent's cache free.
 
-**Compute it, do not assume it.** With X=0.65, Y=0.12, Z=0.23 and a strong model at $15/$75
-against a cheap one at $3/$15, delegation wins by ~28%. Drop strong output to $25/M and inline
-wins by 33%. Breakeven near $52/M. Substitute today's prices.
+**Compute it, do not assume it.** With X=0.65, Y=0.12, Z=0.23 (Mtok) at today's prices:
+Opus 5.5 delegating to Sonnet 5.5 costs 31% *more* than doing it inline; to Haiku it saves 13%;
+Fable delegating to Sonnet saves 22%. The narrower the price gap, the less delegation pays.
+Rerun `estimate_costs` when prices change.
 
 ## The rule that survives price changes
 
@@ -49,8 +50,9 @@ compression. One whose transcript the parent re-reads has thrown the advantage a
 Once the compression check says delegate, `jev_route_model(task=...)` picks the cheapest
 Claude model that should pass and returns `selected` — pass it verbatim as the Agent tool's
 `model` parameter. It already applies rule 5: below 0.75 confidence it returns the strongest
-ordinary tier it gave at least 20% weight to — so a sonnet/haiku split stays on Sonnet, while any
-weight on Opus, Fable or `human` means Opus — except on a mechanical task (complexity under 0.5), where a cheap
+ordinary tier it gave at least 20% weight to, and Opus only from 40% — so a sonnet/haiku split stays
+on Sonnet, a 68/32 sonnet/opus split stays on Sonnet, while 40%+ on Opus or any 20%+ weight on Fable or
+`human` means Opus — except on a mechanical task (complexity under 0.5), where a cheap
 tier is accepted from 0.5, because a Haiku retry on a one-line edit is nearly free. `human`
 means do not delegate.
 
@@ -58,16 +60,21 @@ In Claude Code this also runs as a `PreToolUse` hook on the Agent tool (`hooks.p
 route-agent`), so a subagent spawned without an explicit `model` gets one whether or not
 the caller remembered. An explicit `model` is always respected.
 
-The catalog, USD per million tokens, first-party rates:
+The catalog, USD per million tokens, first-party rates, fits from Anthropic's
+[model selection matrix](https://platform.claude.com/docs/en/about-claude/models/choosing-a-model):
 
 | key | model | in | out | fit |
 |---|---|---|---|---|
-| `haiku` | claude-haiku-4-5 | 1 | 5 | classify, format, search-and-report |
-| `sonnet` | claude-sonnet-5 | 2 | 10 | day-to-day coding and research |
-| `opus` | claude-opus-5 | 5 | 25 | hard debugging, subtle refactors |
-| `fable` | claude-fable-5-1 | 10 | 50 | frontier architecture and design, where a wrong structural decision is expensive to unwind |
+| `haiku` | claude-haiku-4-5 | 1 | 5 | classify, format, high-volume or latency-sensitive sub-agent tasks |
+| `sonnet` | claude-sonnet-5-5 | 2 | 10 | everyday coding, data analysis, content, agentic tool use |
+| `opus` | claude-opus-5-5 | 4 | 20 | large refactors, complex systems engineering, hard debugging, vision, computer use |
+| `fable` | claude-fable-5-1 | 10 | 50 | work Opus falls short on: hours-long agent sessions, deep research, finished documents and decks |
 
-**Fable is the top of the range, not a cheap tier.** It costs twice Opus. It is
+Anthropic's own default is Opus 5.5, moving to Fable only when Opus at `xhigh`/`max` effort
+still falls short — the same shape as the router's fallback. Within one model, effort is often
+a better lever than switching tiers.
+
+**Fable is the top of the range, not a cheap tier.** It costs 2.5× Opus. It is
 escalation-only: the router returns it when Jev proposes it with confidence, never as the
 fallback for an uncertain route and never as a default for routine subtasks.
 

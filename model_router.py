@@ -39,30 +39,41 @@ MECHANICAL_CONFIDENCE = 0.5
 # tier outside the ordinary set (escalation-only, or human) still means the
 # strongest ordinary tier — that mass is a signal the task is hard.
 MIN_FALLBACK_MASS = 0.2
+# Climbing to the strongest ordinary tier on an uncertain route needs more
+# than a minority vote. A 68/32 sonnet-vs-opus split on a well-specified
+# build is Jev preferring Sonnet, not doubting it; at 20% that split always
+# landed on Opus (owner decision 2026-10-01). Weight outside the ordinary set
+# (Fable, human) still means "hard" at MIN_FALLBACK_MASS.
+MIN_TOP_TIER_FALLBACK_MASS = 0.4
 
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
-# Fable is the top of the range, not a cheap tier: it costs twice Opus. It is
+# Fits follow Anthropic's model selection matrix (docs: choosing-a-model).
+# Fable is the top of the range, not a cheap tier: it costs 2.5x Opus. It is
 # escalation_only — Jev may propose it with confidence, but an *uncertain* route
 # falls back to an ordinary tier (at most Opus), never up to Fable.
 DEFAULT_CATALOG: dict[str, dict] = {
     "haiku":  {"id": "claude-haiku-4-5",
                "fit": "Classification, formatting, simple mechanical edits, "
-                      "search-and-report subtasks that return a short answer",
+                      "high-volume or latency-sensitive sub-agent tasks that "
+                      "return a short answer",
                "cost_in": 1.0, "cost_out": 5.0, "tier": 1},
-    "sonnet": {"id": "claude-sonnet-5",
-               "fit": "Normal coding, research, multi-file edits, "
-                      "most day-to-day engineering",
+    "sonnet": {"id": "claude-sonnet-5-5",
+               "fit": "Everyday coding, research and agent work: code generation, "
+                      "multi-file edits, data analysis, content creation, agentic tool use",
                "cost_in": 2.0, "cost_out": 10.0, "tier": 2},
-    "opus":   {"id": "claude-opus-5",
-               "fit": "Complex architecture, hard debugging, subtle refactors, "
-                      "work where a wrong answer is expensive to detect",
-               "cost_in": 5.0, "cost_out": 25.0, "tier": 3},
+    "opus":   {"id": "claude-opus-5-5",
+               "fit": "Complex agentic coding: large-scale refactoring, complex systems "
+                      "engineering and architecture, hard debugging, vision-heavy work, "
+                      "computer use, work where a wrong answer is expensive to detect",
+               "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
     "fable":  {"id": "claude-fable-5-1",
-               "fit": "Frontier complexity: long-horizon architecture, system design "
-                      "and complex multi-page web design where a wrong structural "
-                      "decision is expensive to unwind. Never routine tasks, and not "
-                      "for ordinary multi-step work that Opus handles",
+               "fit": "Frontier work Opus falls short on: agent sessions that run for "
+                      "hours, multistep deep research, analysis carried through to a "
+                      "finished document, spreadsheet or deck, complex multi-page web "
+                      "design where a wrong structural decision is expensive to unwind. "
+                      "Never routine tasks, and not for ordinary multi-step work that "
+                      "Opus handles",
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
 }
 
@@ -117,8 +128,12 @@ def estimate_costs(
 
 def _fallback(probabilities: Mapping[str, float] | None,
               ordinary: Mapping[str, Mapping], strongest: str) -> str:
-    contenders = [k for k, p in (probabilities or {}).items() if p >= MIN_FALLBACK_MASS]
-    if not contenders or any(k not in ordinary for k in contenders):
+    probabilities = probabilities or {}
+    if any(k not in ordinary and p >= MIN_FALLBACK_MASS for k, p in probabilities.items()):
+        return strongest
+    contenders = [k for k, p in probabilities.items() if k in ordinary and p >= (
+        MIN_TOP_TIER_FALLBACK_MASS if k == strongest else MIN_FALLBACK_MASS)]
+    if not contenders:
         return strongest
     return max(contenders, key=lambda k: ordinary[k]["tier"])
 
@@ -188,7 +203,9 @@ def route_model(
         selected = proposed
     else:
         selected = _fallback(answer.probabilities, ordinary, strongest)
-        fallback = "low_confidence"
+        # A fallback that lands on the proposed model changed nothing: it is not
+        # an escalation, so it must not be reported as one.
+        fallback = None if selected == proposed else "low_confidence"
     if selected not in eligible and selected != "human":
         selected, fallback = strongest, "not_eligible"
 

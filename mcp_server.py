@@ -529,7 +529,8 @@ def jev_route_model(
     for every spawn without an explicit model; call it only where no hook runs.
 
     Pass `selected` as the model. Below 75% confidence it returns the strongest
-    tier Jev gave 20% weight (mechanical tasks: cheap tier accepted from 50%).
+    tier Jev gave 20% weight, Opus only from 40% (mechanical tasks: cheap tier
+    accepted from 50%).
     Fable is escalation-only, never a fallback. `human` means do not delegate.
     """
     _require_key()
