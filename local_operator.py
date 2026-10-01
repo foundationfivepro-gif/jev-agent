@@ -14,7 +14,7 @@ import urllib.request
 
 from pydantic import Field, model_validator
 from host_contracts import StrictContract, CapabilitySnapshot, Identifier, Number, TaskEnvelope
-from live_pilot import Approval, _money
+from live_pilot import Approval, PilotError, _money
 from live_routing import (ProtectedOpenRouterTransport, RoutingAuthorization,
                          LiveRoutingError, payload_fingerprint, _NoRedirects, MODEL)
 from unified_mcp import (UnifiedOperator, OperationGrant, CredentialUnavailable,
@@ -83,6 +83,63 @@ class Prices(StrictContract):
                                     min(expiry,self.expires_at),frozenset(self.actual_models),self.evidence)
 
 
+class JevCatalogPrices(StrictContract):
+    """Only the published input-only Jev tariff; unknown extensions fail closed."""
+    prompt: str
+    completion: str
+    discount: Number = 0
+
+    @model_validator(mode='after')
+    def valid(self):
+        try:
+            unsupported = _money(self.prompt) <= 0 or _money(self.completion) != 0 or self.discount != 0
+        except PilotError:
+            raise ValueError('unsupported Jev tariff') from None
+        if unsupported:
+            raise ValueError('unsupported Jev tariff')
+        return self
+
+
+class JevInputOnlyPrices(StrictContract):
+    """Operator-attested public metadata, not an omitted-fees-equal-zero rule.
+
+    Contract: https://openrouter.ai/docs/guides/community/jev documents input
+    token billing and free output on System One. Auxiliary prices are N/A for
+    this narrow text/decisions request shape. Generic Prices stays unchanged.
+    """
+    profile: Literal['jev_systemone_input_only']
+    observed_at: Number
+    expires_at: Number
+    evidence: Identifier
+    alias: Literal['~typesafe/jev-latest']
+    alias_target: Literal['typesafe/jev-1.13']
+    canonical_model: str = Field(pattern=r'^typesafe/jev-1\.13-[0-9]{8}$')
+    endpoint_model_id: Literal['typesafe/jev-1.13']
+    provider_name: Literal['TypeSafe']
+    supports_implicit_caching: Literal[False]
+    context_tokens: Literal[32000]
+    actual_models: list[Identifier] = Field(min_length=1,max_length=1)
+    alias_pricing: JevCatalogPrices
+    model_pricing: JevCatalogPrices
+    endpoint_pricing: JevCatalogPrices
+
+    @model_validator(mode='after')
+    def valid(self):
+        if (self.expires_at <= self.observed_at or self.actual_models != [self.canonical_model]
+                or len({_money(p.prompt) for p in
+                        (self.alias_pricing,self.model_pricing,self.endpoint_pricing)}) != 1):
+            raise ValueError('inconsistent Jev metadata')
+        return self
+
+    def quote(self, payload, now, expiry):
+        if (not self.observed_at <= now < self.expires_at or now-self.observed_at>300
+                or set(payload) != {'model','state','questions'} or payload['model'] != MODEL):
+            raise LiveRoutingError()
+        ceiling=self.context_tokens*_money(self.endpoint_pricing.prompt)
+        return RoutingAuthorization(payload_fingerprint(payload),str(ceiling),
+                                    min(expiry,self.expires_at),frozenset(self.actual_models),self.evidence)
+
+
 class TaskConsent(StrictContract):
     task_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     expires_at: Number
@@ -121,7 +178,7 @@ class LocalOperatorConfig(StrictContract):
     workspace_roots: list[str] = Field(min_length=1,max_length=16)
     snapshot: CapabilitySnapshot
     catalog_evidence: Identifier
-    prices: Prices
+    prices: Prices | JevInputOnlyPrices
     tasks: list[TaskConsent] = Field(max_length=64)
     operations: list[ToolConsent] = Field(max_length=64)
 

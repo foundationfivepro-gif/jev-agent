@@ -112,7 +112,7 @@ TaskEnvelope; gate uses `command` and default `cwd="."`; context uses `goal`,
 included in the hash. Authorization files are operator authority, not signatures
 or independent proof of consent. Untrusted task code must not control them.
 
-`prices` requires `observed_at`, `expires_at`, `evidence`, `actual_models`,
+The existing generic `prices` profile requires `observed_at`, `expires_at`, `evidence`, `actual_models`,
 `context_tokens`, `prompt_per_token`, `completion_per_token`,
 `cache_read_per_token`, `cache_write_per_token`, `request_fee`, and
 `other_fees_upper_usd`. Every rate/fee is an explicit nonnegative decimal string;
@@ -122,6 +122,66 @@ auxiliary charges. Missing metadata does not mean zero. The adapter calculates a
 conservative full-context bound by summing all token rates, multiplying by the
 verified context bound (at most 32000), and adding request/other fee bounds.
 This is validation of operator-supplied evidence, not independent price discovery.
+
+### Mac migration: documented Jev input-only tariff
+
+Keep the generic profile unchanged when a complete fee schedule is available.
+For the documented Jev 1.13 System One input-only contract, replace the entire
+`prices` object with this shape, substituting freshly observed timestamps and an
+actual evidence reference (the times below are deliberately expired):
+
+```json
+{
+  "profile": "jev_systemone_input_only",
+  "observed_at": 1.0,
+  "expires_at": 2.0,
+  "evidence": "REPLACE_WITH_FRESH_PUBLIC_METADATA_EVIDENCE",
+  "alias": "~typesafe/jev-latest",
+  "alias_target": "typesafe/jev-1.13",
+  "canonical_model": "typesafe/jev-1.13-20260917",
+  "endpoint_model_id": "typesafe/jev-1.13",
+  "provider_name": "TypeSafe",
+  "supports_implicit_caching": false,
+  "context_tokens": 32000,
+  "actual_models": ["typesafe/jev-1.13-20260917"],
+  "alias_pricing": {"prompt": "0.000000042", "completion": "0"},
+  "model_pricing": {"prompt": "0.000000042", "completion": "0"},
+  "endpoint_pricing": {"prompt": "0.000000042", "completion": "0", "discount": 0}
+}
+```
+
+Use these unauthenticated metadata sources together:
+
+- [Alias](https://openrouter.ai/api/v1/model/~typesafe/jev-latest): `alias_target.slug`, context and pricing.
+- [Model](https://openrouter.ai/api/v1/model/typesafe/jev-1.13): canonical slug, context and pricing.
+- [Endpoint](https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints): model ID, provider, context, implicit caching and pricing.
+
+The operator must verify all three observations, with `observed_at` set to the
+oldest observation and expiry bounded by all evidence and approval. Each context
+must be 32000. Copy complete pricing objects, not a filtered subset: unknown
+fields (including overrides or request/cache fees) reject this narrow profile.
+Prompt rates must agree, completion must be zero, and discount must be absent or
+zero. Input prices are read from metadata, not hardcoded. Future Jev versions
+require a reviewed contract update; the requested model remains `jev-latest`.
+
+Remove generic `prompt_per_token`, `completion_per_token`, `cache_read_per_token`,
+`cache_write_per_token`, `request_fee`, and `other_fees_upper_usd`. They are not
+accepted in this profile. Auxiliary fees are **not applicable** under the
+[documented Jev input-only contract](https://openrouter.ai/docs/guides/community/jev),
+not guessed numeric zeros. Only the fixed System One model/state/questions
+request shape is allowed. No ledger, credential, consent-hash or transport field
+migration is needed; refresh existing grants/catalog expiry as usual.
+
+The full-context ceiling is `32000 * prompt`, currently `$0.001344` per call.
+Gate/context operations reserve their entire authorized cap before execution;
+each subcall independently requires a fresh quote that fits the remaining
+reservation before any HTTP request. Three single-call smoke checks therefore
+need at least `$0.004032` reserved in aggregate under the published tariff.
+Context batching/refinement can require more calls; cap the operation accordingly.
+Actual billed cost is reconciled, and missing cost, overbilling or response
+provider/model mismatch halts the ledger. A moving alias can change after
+preflight; detecting a changed response prevents subsequent calls, not the
+already-issued call. Local bounds rely on the provider honoring published prices.
 
 ## Credential and transport boundary
 
