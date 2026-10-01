@@ -464,6 +464,7 @@ def decide_batched(
     questions: Mapping[str, Any],
     *,
     size: int | None = None,
+    decide_fn: Callable | None = None,
 ) -> Decision:
     """
     Same contract as decide(), for question sets above the per-call ceiling.
@@ -476,18 +477,19 @@ def decide_batched(
     the state so each batch carries only the items its questions ask about turns
     that back into roughly one pass over the data.
     """
+    decide_fn = decide_fn or decide
     size = size or MAX_QUESTIONS
     ids = list(questions)
     slice_state = state if callable(state) else (lambda _ids: state)
 
     if len(ids) <= size:
-        return decide(slice_state(ids), questions)
+        return decide_fn(slice_state(ids), questions)
 
     merged: dict[str, Answer] = {}
     model = transport = ""
     tin = tout = 0
     for group in _batches(ids, slice_state, questions, size):
-        part = decide(slice_state(group), {qid: questions[qid] for qid in group})
+        part = decide_fn(slice_state(group), {qid: questions[qid] for qid in group})
         merged.update(part.answers)
         model, transport = part.model, part.transport
         tin += part.input_tokens

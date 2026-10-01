@@ -817,7 +817,7 @@ def triage(command: str) -> tuple[str, str]:
     return "local", "local command; no Jev call"
 
 
-def gate(command: str, cwd: str = ".") -> dict:
+def gate(command: str, cwd: str = ".", *, decide_fn=None, trace_fn=None, operator_allow_fn=None) -> dict:
     """
     Decide allow / review / block for one command.
 
@@ -826,26 +826,29 @@ def gate(command: str, cwd: str = ".") -> dict:
     Jev can downgrade allow to review but can
     never upgrade a hard block.
     """
+    decide_fn = decide_fn or decide
+    trace_fn = trace_fn or write_trace
+    operator_allow_fn = operator_allow_fn or operator_allow
     if not command.strip():
         return {"final": "block", "reason": "empty command", "proposed": None}
 
     kind, reason = triage(command)
     if kind == "block":
         decision = {"proposed": None, "final": "block", "reason": reason, "source": "policy"}
-        write_trace("permission", {"command": command, "cwd": cwd}, decision)
+        trace_fn("permission", {"command": command, "cwd": cwd}, decision)
         return decision
 
     binaries = extract_commands(command)
     state = {"command": command, "binaries": binaries, "cwd": cwd}
 
-    approved = operator_allow(command, cwd)
+    approved = operator_allow_fn(command, cwd)
     if approved:
         decision = {"proposed": None, "final": "allow", "reason": f"owner allowlist: {approved['reason']}",
                     "source": "operator_allowlist", "expires": approved["expires"], "binaries": binaries}
-        write_trace("permission", state, decision)
+        trace_fn("permission", state, decision)
         return decision
 
-    result = decide(state, {
+    result = decide_fn(state, {
         "route": Choice(
             instructions="How should this command be handled?" + UNTRUSTED,
             criteria={
@@ -925,7 +928,7 @@ def gate(command: str, cwd: str = ".") -> dict:
         "binaries": binaries,
         "probabilities": route.probabilities,
     }
-    write_trace("permission", state, decision)
+    trace_fn("permission", state, decision)
     return decision
 
 

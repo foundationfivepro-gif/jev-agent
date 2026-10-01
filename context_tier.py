@@ -118,6 +118,9 @@ def select(
     refine_top: int = 25,
     authorized_snippet_ids: frozenset[str] = frozenset(),
     snippet_chars: int = 200,
+    strict_refinement: bool = False,
+    decide_batch_fn=None,
+    trace_fn=None,
 ) -> Packed:
     """
     Score every chunk against `goal` and pack the context.
@@ -129,6 +132,8 @@ def select(
     `refine_top` re-scores that many leading candidates in a single call so the
     boundary decisions are made on comparable numbers; set it to 0 to skip.
     """
+    decide_batch_fn = decide_batch_fn or decide_batched
+    trace_fn = trace_fn or write_trace
     screen_outbound(goal)
     if not chunks:
         return Packed()
@@ -186,7 +191,7 @@ def select(
         keep = set(ids) | set(canary.CANARY_IDS)
         return screen_outbound({"goal": goal, "chunks": {k: v for k, v in state_chunks.items() if k in keep}})
 
-    result: Decision = decide_batched(state_for, questions)
+    result: Decision = decide_batch_fn(state_for, questions)
 
     probe_result = canary.check_separation(
         result, [canary.CANARY_RELEVANT["id"]], [canary.CANARY_IRRELEVANT["id"]]
@@ -217,13 +222,15 @@ def select(
         screen_outbound(refine_state)
         refine_questions = {cid: questions[cid] for cid in short_ids + list(canary.CANARY_IDS)}
         try:
-            refined = decide_batched(lambda _ids: refine_state, refine_questions)
+            refined = decide_batch_fn(lambda _ids: refine_state, refine_questions)
             canary.check_separation(
                 refined, [canary.CANARY_RELEVANT["id"]], [canary.CANARY_IRRELEVANT["id"]]
             ).raise_if_failed()
             for cid in short_ids:
                 scores[cid] = float(refined.value(cid, scores[cid]))
         except (canary.CanaryError, Exception) as exc:  # noqa: B014 - keep pass one
+            if strict_refinement:
+                raise
             # A failed refinement must not discard a usable first pass.
             probe_result = probe_result.__class__(
                 probe_result.ok, probe_result.separation, probe_result.positive_mean,
@@ -257,7 +264,7 @@ def select(
             used += _tokens(entry)
 
     packed.tokens_out = used
-    write_trace(
+    trace_fn(
         "context_tier",
         {"chunk_ids": [safe_metadata(c.id) for c in chunks]},
         {

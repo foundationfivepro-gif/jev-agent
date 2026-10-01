@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "transport": "direct_env",
+  "budget_scope": "local_synthetic_smoke",
+  "approval_evidence": "approval-pending-do-not-enable",
+  "ledger_creation_authorized": false,
+  "ledger_path": "/Users/administrator/.codex/integrations/jev-openrouter/state/smoke.sqlite",
+  "ledger_approval_id": "replace-with-separately-approved-smoke-id",
+  "ledger_cap_usd": ".10",
+  "minimum_charged_usd": "0",
+  "approval_expires_at": 0.0,
+  "workspace_roots": [
+    "/Users/administrator/Documents/Codex/2026-10-01/task"
+  ],
+  "snapshot": {
+    "surface": "codex_local",
+    "runtime_id": "replace-with-observed-runtime",
+    "session_id": "replace-with-observed-session",
+    "observed_at": 0.0,
+    "expires_at": 0.0,
+    "available": false,
+    "observed_tools": [],
+    "dispatch_controls": [],
+    "models": [],
+    "evidence_status": "unverified"
+  },
+  "catalog_evidence": "replace-with-observation-evidence",
+  "prices": {
+    "observed_at": 0.0,
+    "expires_at": 0.0,
+    "evidence": "replace-with-complete-verified-pricing",
+    "actual_models": [],
+    "context_tokens": 32000,
+    "prompt_per_token": "0",
+    "completion_per_token": "0",
+    "cache_read_per_token": "0",
+    "cache_write_per_token": "0",
+    "request_fee": "0",
+    "other_fees_upper_usd": "0"
+  },
+  "tasks": [],
+  "operations": []
+}
