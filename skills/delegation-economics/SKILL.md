@@ -10,16 +10,18 @@ Cost is dominated by **how much context is re-processed**, not by subtask diffic
 
 ```
 inline    = big_out·Y + big_in·Z
-delegated = small_in·X + small_out·Y + small_in·Z + big_in·(Y + Z)
-                ↑ load context          ↑ the parent pays to absorb the result
+delegated = small_in·X + small_out·Y + small_in·Z + big_in·R
+                ↑ load context          ↑ the parent reads what comes back (R)
 ```
 
-The forgotten term is the last: a delegate's output does not land in the parent's cache free.
+R is the term that decides it. With a return contract (the hook appends one), R is the
+conclusion — a few hundred tokens. Without one, R is everything the delegate produced and
+read (Y + Z), and the saving is gone.
 
-**Compute it, do not assume it.** With X=0.65, Y=0.12, Z=0.23 (Mtok) at today's prices:
-Opus 5.5 delegating to Sonnet 5.5 costs 31% *more* than doing it inline; to Haiku it saves 13%;
-Fable delegating to Sonnet saves 22%. The narrower the price gap, the less delegation pays.
-Rerun `estimate_costs` when prices change.
+**Compute it, do not assume it.** With X=0.65, Y=0.12, Z=0.23 Mtok at today's prices, an
+Opus 5.5 parent delegating to Sonnet 5.5 saves 11% when ~250 tokens come back, but costs
+31% *more* when the parent absorbs the full transcript; to Haiku, 55% vs 13%.
+`estimate_costs(..., returned_mtok=R)` reruns it at your prices and sizes.
 
 ## The rule that survives price changes
 
@@ -42,23 +44,32 @@ compression. One whose transcript the parent re-reads has thrown the advantage a
 2. Say in the prompt what to return: the conclusion, not the evidence.
 3. Parallelise independent delegates in one message.
 4. Don't delegate what is already loaded — warm context is nearly free.
-5. **Fail toward capability.** An uncertain route goes to the stronger model; a cheap failure
-   costs the cheap attempt, the expensive retry, and the latency of noticing.
+5. **Sonnet first.** Sonnet 5.5 handles everyday coding, multi-file edits, research and
+   agentic tool use. An uncertain route goes to Sonnet and climbs to Opus only when Jev's
+   weight on Opus pays for skipping Sonnet — see below.
+6. **Never stop for a route.** No key, no answer, or an unclear task: delegate on Sonnet
+   and keep working. Routing never asks a person anything.
 
 ## Which model — `jev_route_model`
 
 Once the compression check says delegate, `jev_route_model(task=...)` picks the cheapest
-Claude model that should pass and returns `selected` — pass it verbatim as the Agent tool's
-`model` parameter. It already applies rule 5: below 0.75 confidence it returns the strongest
-ordinary tier it gave at least 20% weight to, and Opus only from 40% — so a sonnet/haiku split stays
-on Sonnet, a 68/32 sonnet/opus split stays on Sonnet, while 40%+ on Opus or any 20%+ weight on Fable or
-`human` means Opus — except on a mechanical task (complexity under 0.5), where a cheap
-tier is accepted from 0.5, because a Haiku retry on a one-line edit is nearly free. `human`
-means do not delegate.
+Claude model that should pass and returns `selected` — always a model; pass it verbatim as
+the Agent tool's `model` parameter.
 
-In Claude Code this also runs as a `PreToolUse` hook on the Agent tool (`hooks.py
-route-agent`), so a subagent spawned without an explicit `model` gets one whether or not
-the caller remembered. An explicit `model` is always respected.
+- Jev at least 0.75 confident: its proposal (Haiku, Sonnet or Opus) is taken.
+- Less confident: Sonnet, unless Jev's weight on Opus is at least `1 − sonnet/opus` output
+  price — 0.5 today. Reading that weight as the chance Sonnet falls short, Sonnet first
+  and an Opus retry is cheaper in expectation below it. It is a heuristic until calibrated
+  against outcomes (`hooks.py report`): it ignores token-volume differences and latency. A 55/44 sonnet/opus split stays on Sonnet; 50/49 for Opus
+  goes to Opus.
+- Mechanical tasks (complexity under 0.5) accept a Haiku proposal from 0.5: a Haiku retry on
+  a one-line edit is nearly free. Otherwise an uncertain route never goes below Sonnet.
+- No key, Jev unreachable, a task that looks like it holds a secret, or no eligible model:
+  Sonnet. Never the parent's model by inheritance (it may be Opus or Fable), never a stop.
+
+In Claude Code this runs as a `PreToolUse` hook on the Agent tool (`hooks.py route-agent`), so
+a subagent spawned without an explicit `model` gets one whether or not the caller remembered.
+An explicit `model` is always kept — set `opus` yourself when you know the task needs it.
 
 The catalog, USD per million tokens, first-party rates, fits from Anthropic's
 [model selection matrix](https://platform.claude.com/docs/en/about-claude/models/choosing-a-model):
@@ -68,15 +79,13 @@ The catalog, USD per million tokens, first-party rates, fits from Anthropic's
 | `haiku` | claude-haiku-4-5 | 1 | 5 | classify, format, high-volume or latency-sensitive sub-agent tasks |
 | `sonnet` | claude-sonnet-5-5 | 2 | 10 | everyday coding, data analysis, content, agentic tool use |
 | `opus` | claude-opus-5-5 | 4 | 20 | large refactors, complex systems engineering, hard debugging, vision, computer use |
-| `fable` | claude-fable-5-1 | 10 | 50 | work Opus falls short on: hours-long agent sessions, deep research, finished documents and decks |
+| `fable` | claude-fable-5-1 | 10 | 50 | never routed; only when the owner names it |
 
-Anthropic's own default is Opus 5.5, moving to Fable only when Opus at `xhigh`/`max` effort
-still falls short — the same shape as the router's fallback. Within one model, effort is often
-a better lever than switching tiers.
+Within one model, effort is often a better lever than switching tiers: Sonnet at higher
+effort before Opus.
 
-**Fable is the top of the range, not a cheap tier.** It costs 2.5× Opus. It is
-escalation-only: the router returns it when Jev proposes it with confidence, never as the
-fallback for an uncertain route and never as a default for routine subtasks.
+**Fable is never routed.** It costs 2.5× Opus and is not offered to Jev at all. Use it only
+by setting the model yourself when the owner asks for it by name.
 
 In Claude Code the Agent hook does this on every spawn that sets no `model`, and appends a
 return contract to the prompt, so the parent reads a conclusion instead of a transcript.

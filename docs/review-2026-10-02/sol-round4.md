@@ -1,0 +1,2 @@
+1. **The hook reads model restrictions before loading `.env`.** [hooks.py:250](/Users/administrator/Projects/jev-agent/hooks.py:250) builds `cat` before `_have_key()` loads configuration. A simulated `.env` containing `JEV_MODELS=haiku` still selected Sonnet, bypassing availability restrictions and increasing cost. Empty or credential-shaped prompts skip configuration loading entirely. **Exact change:** call `_load_env()` before constructing the catalog and eligibility set; add tests for `.env` restrictions on successful routing, outage, and skipped-routing paths.
+

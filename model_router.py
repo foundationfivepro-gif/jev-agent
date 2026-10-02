@@ -34,24 +34,24 @@ MIN_CONFIDENCE = 0.75
 MECHANICAL_COMPLEXITY = 0.5
 MECHANICAL_CONFIDENCE = 0.5
 
-# An uncertain route falls back to the strongest tier Jev gave real weight to,
-# not blindly to the top: a sonnet-vs-haiku split never needed Opus. Weight on a
-# tier outside the ordinary set (escalation-only, or human) still means the
-# strongest ordinary tier — that mass is a signal the task is hard.
-MIN_FALLBACK_MASS = 0.2
-# Climbing to the strongest ordinary tier on an uncertain route needs more
-# than a minority vote. A 68/32 sonnet-vs-opus split on a well-specified
-# build is Jev preferring Sonnet, not doubting it; at 20% that split always
-# landed on Opus (owner decision 2026-10-01). Weight outside the ordinary set
-# (Fable, human) still means "hard" at MIN_FALLBACK_MASS.
-MIN_TOP_TIER_FALLBACK_MASS = 0.4
+# Sonnet-first (owner decision 2026-10-02: Sonnet 5.5 handles everyday coding,
+# multi-file edits, research and agentic tool use). An uncertain route lands on
+# the floor tier — Sonnet — and climbs only where trying the floor first is
+# expected to cost more than going straight up. Heuristic, pending calibration
+# against outcomes: treating Jev's weight p on the higher tier as the chance the
+# floor falls short, floor-first costs floor + p * higher and going up costs
+# higher, so climbing pays from p >= 1 - floor/higher (0.5 at today's prices).
+# It ignores token-volume differences and latency; it tracks the price list.
+# Haiku is reached on an uncertain route only through the mechanical path.
+FLOOR_TIER = "sonnet"
 
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
 # Fits follow Anthropic's model selection matrix (docs: choosing-a-model).
 # Fable is the top of the range, not a cheap tier: it costs 2.5x Opus. It is
-# escalation_only — Jev may propose it with confidence, but an *uncertain* route
-# falls back to an ordinary tier (at most Opus), never up to Fable.
+# escalation_only — never offered to Jev and never selected (owner decision
+# 2026-10-02: Fable was for one dev effort). A spawn that names it explicitly
+# keeps it; the hook never overrides an explicit model.
 DEFAULT_CATALOG: dict[str, dict] = {
     "haiku":  {"id": "claude-haiku-4-5",
                "fit": "Classification, formatting, simple mechanical edits, "
@@ -84,12 +84,14 @@ def available_catalog(catalog: Mapping[str, Mapping] = DEFAULT_CATALOG) -> dict[
     that can pick a model the account cannot run is choosing from yesterday's menu.
     """
     wanted = {m.strip().lower() for m in os.environ.get("JEV_MODELS", "").split(",") if m.strip()}
-    menu = {k: dict(v) for k, v in catalog.items() if not wanted or k in wanted}
-    return menu or {k: dict(v) for k, v in catalog.items()}
+    # A restriction is never widened: a typo yields no route (the hook then uses
+    # its own fallback), not models the account may not have.
+    return {k: dict(v) for k, v in catalog.items() if not wanted or k in wanted}
 
 
 def estimate_costs(
-    catalog: Mapping[str, Mapping], *, context_mtok: float, output_mtok: float, tool_mtok: float
+    catalog: Mapping[str, Mapping], *, context_mtok: float, output_mtok: float, tool_mtok: float,
+    returned_mtok: float | None = None,
 ) -> dict:
     """
     Compare doing the whole task on each model against delegating generation to
@@ -97,6 +99,10 @@ def estimate_costs(
 
     Returns per-model totals plus the delegated total, so a caller can see
     whether routing actually pays at *their* prices and context size.
+
+    `returned_mtok` is what the parent actually reads back. Left unset, the parent
+    absorbs all the delegate's output and tool reads — no compression at all.
+    With a return contract it is the conclusion only, usually a few hundred tokens.
     """
     names = sorted(catalog, key=lambda k: catalog[k]["tier"])
     # The comparison is against the model the router actually falls back to,
@@ -112,7 +118,8 @@ def estimate_costs(
         cheap["cost_in"] * context_mtok          # cheap model loads the context
         + cheap["cost_out"] * output_mtok        # cheap model generates
         + cheap["cost_in"] * tool_mtok           # cheap model reads tool output
-        + strong["cost_in"] * (output_mtok + tool_mtok)   # strong model re-reads the result
+        + strong["cost_in"] * (output_mtok + tool_mtok if returned_mtok is None
+                               else returned_mtok)    # strong model reads the result
     )
     best_pure = min(pure, key=pure.get)
     return {
@@ -126,16 +133,47 @@ def estimate_costs(
     }
 
 
+def _trace(*args, **kwargs) -> None:
+    """Best effort: storage failing must never cost a routing decision."""
+    try:
+        write_trace(*args, **kwargs)
+    except Exception:
+        pass
+
+
+def eligible_models(catalog: Mapping[str, Mapping], *, max_cost_in: float = 1e9,
+                    needs_browser: bool = False) -> dict[str, Mapping]:
+    """What the router may pick automatically. Shared by routing and every fallback."""
+    return {
+        k: v for k, v in catalog.items()
+        if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
+        and not v.get("escalation_only")
+    }
+
+
+def floor_model(eligible: Mapping[str, Mapping]) -> str | None:
+    """Sonnet if eligible, else the strongest eligible tier, else None."""
+    if not eligible:
+        return None
+    return FLOOR_TIER if FLOOR_TIER in eligible else max(eligible, key=lambda k: eligible[k]["tier"])
+
+
+def climb_mass(catalog: Mapping[str, Mapping], floor: str, higher: str) -> float:
+    """Weight on `higher` from which skipping the floor tier is cheaper in expectation."""
+    return 1.0 - catalog[floor]["cost_out"] / catalog[higher]["cost_out"]
+
+
 def _fallback(probabilities: Mapping[str, float] | None,
-              ordinary: Mapping[str, Mapping], strongest: str) -> str:
+              ordinary: Mapping[str, Mapping]) -> str:
+    """Floor tier, unless a higher ordinary tier carries enough weight to pay for itself."""
     probabilities = probabilities or {}
-    if any(k not in ordinary and p >= MIN_FALLBACK_MASS for k, p in probabilities.items()):
-        return strongest
-    contenders = [k for k, p in probabilities.items() if k in ordinary and p >= (
-        MIN_TOP_TIER_FALLBACK_MASS if k == strongest else MIN_FALLBACK_MASS)]
-    if not contenders:
-        return strongest
-    return max(contenders, key=lambda k: ordinary[k]["tier"])
+    floor = floor_model(ordinary)
+    above = sorted((k for k in ordinary if ordinary[k]["tier"] > ordinary[floor]["tier"]),
+                   key=lambda k: ordinary[k]["tier"], reverse=True)
+    for k in above:
+        if probabilities.get(k, 0.0) >= climb_mass(ordinary, floor, k):
+            return k
+    return floor
 
 
 def route_model(
@@ -154,18 +192,17 @@ def route_model(
     None when Jev's proposal was taken. `trace_meta` is stored with the trace
     (hooks pass `tool_use_id`) so the subagent's outcome can be joined to it.
     """
-    eligible = {
-        k: v for k, v in catalog.items()
-        if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
-    }
+    # Escalation-only tiers are never offered, so Jev's weight is spread over
+    # models the router may actually pick. Capability doubt is not a reason to
+    # stop work: there is no "human" candidate, only the strongest ordinary tier.
+    eligible = eligible_models(catalog, max_cost_in=max_cost_in, needs_browser=needs_browser)
     if not eligible:
-        decision = {"selected": "human", "reason": "no eligible model", "source": "policy",
+        decision = {"selected": None, "reason": "no eligible model", "source": "policy",
                     "fallback": "no_eligible_model"}
-        write_trace("model_router", {"task": task}, decision, meta=trace_meta)
+        _trace("model_router", {"task": task}, decision, meta=trace_meta)
         return decision
 
     criteria = {k: v["fit"] for k, v in eligible.items()}
-    criteria["human"] = "None of these should attempt this unaided"
 
     state = {
         "task": task,
@@ -181,13 +218,9 @@ def route_model(
     })
 
     answer = result.answers["model"]
-    # Fail closed toward capability: an uncertain route goes to the strongest
-    # tier Jev seriously considered (see MIN_FALLBACK_MASS), because a cheap
-    # failure costs the cheap attempt plus the expensive retry plus the latency
-    # of noticing. Escalation-only tiers are excluded from that fallback —
-    # uncertainty is not a reason to pay double.
-    ordinary = {k: v for k, v in eligible.items() if not v.get("escalation_only")} or eligible
-    strongest = max(ordinary, key=lambda k: ordinary[k]["tier"])
+    # An uncertain route goes to the floor tier unless a higher tier's weight
+    # pays for skipping it (see FLOOR_TIER); never below the floor.
+    ordinary = eligible
     proposed = str(answer.value)
     complexity = result.value("complexity")
 
@@ -202,12 +235,12 @@ def route_model(
     if answer.certainty >= threshold:
         selected = proposed
     else:
-        selected = _fallback(answer.probabilities, ordinary, strongest)
+        selected = _fallback(answer.probabilities, ordinary)
         # A fallback that lands on the proposed model changed nothing: it is not
         # an escalation, so it must not be reported as one.
         fallback = None if selected == proposed else "low_confidence"
-    if selected not in eligible and selected != "human":
-        selected, fallback = strongest, "not_eligible"
+    if selected not in eligible:
+        selected, fallback = _fallback(answer.probabilities, ordinary), "not_eligible"
 
     decision = {
         "selected": selected,
@@ -223,7 +256,7 @@ def route_model(
         "output_tokens": getattr(result, "output_tokens", None),
         "cost_usd": getattr(result, "cost_usd", None),      # billed, when the transport says
     }
-    write_trace("model_router", state, decision, meta=trace_meta)
+    _trace("model_router", state, decision, meta=trace_meta)
     return decision
 
 
