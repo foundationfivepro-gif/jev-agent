@@ -1264,3 +1264,52 @@ def test_mcp_route_floors_on_any_router_failure(monkeypatch, server):
 
     monkeypatch.setattr(mod, "route_model", broken)
     assert mod._route_or_floor("x", mod.DEFAULT_CATALOG)["selected"] == "sonnet"
+
+
+def test_install_cloud_merges_into_a_repo_and_is_idempotent(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(npm test)"]},
+        "hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "lint"}]}]}}))
+    for _ in range(2):
+        r = subprocess.run([_sys.executable, os.path.join(ROOT, "hooks.py"), "install-cloud",
+                            "--repo", str(repo)], capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+    s = json.loads((repo / ".claude" / "settings.json").read_text())
+    assert s["permissions"] == {"allow": ["Bash(npm test)"]}
+    route = [h for g in s["hooks"]["PreToolUse"] if g.get("matcher") == "Agent|Task" for h in g["hooks"]]
+    assert len(route) == 1 and "jev-cloud.sh" in route[0]["command"]
+    assert any(g.get("matcher") == "Edit" for g in s["hooks"]["PreToolUse"])
+    assert (repo / ".claude" / "jev-cloud.sh").read_text() == open(
+        os.path.join(ROOT, "scripts", "cloud-repo.sh")).read()
+
+
+def _cloud_script(sub, payload, env):
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY",
+                         "JEV_MODELS", "CLAUDE_CODE_REMOTE")}
+    base.update(env)
+    return subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud-repo.sh"), sub],
+                          input=json.dumps(payload), capture_output=True, text=True, env=base, timeout=120)
+
+
+def test_cloud_repo_script_is_a_noop_locally_and_floors_without_jev(tmp_path):
+    spawn = {"tool_input": {"prompt": "find the retry logic"}}
+    assert _cloud_script("route-agent", spawn, {}).stdout == ""            # local machine
+    no_jev = {"CLAUDE_CODE_REMOTE": "true", "JEV_AGENT_DIR": str(tmp_path / "absent")}
+    out = json.loads(_cloud_script("route-agent", spawn, no_jev).stdout)
+    assert out["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+    kept = {"tool_input": {"prompt": "x", "model": "opus"}}
+    assert _cloud_script("route-agent", kept, no_jev).stdout == ""         # explicit model kept
+    assert _cloud_script("gate-bash", {"tool_input": {"command": "ls"}}, no_jev).returncode == 0
+
+
+def test_cloud_repo_script_uses_the_full_router_when_jev_is_present(tmp_path):
+    env = {"CLAUDE_CODE_REMOTE": "true", "JEV_AGENT_DIR": ROOT,
+           "JEV_ENV_FILE": str(tmp_path / "absent.env")}
+    out = json.loads(_cloud_script("route-agent", {"tool_input": {"prompt": "find the retry logic"}}, env).stdout)
+    updated = out["hookSpecificOutput"]["updatedInput"]
+    assert updated["model"] == "sonnet" and "find the retry logic" in updated["prompt"]
+    assert len(updated["prompt"]) > len("find the retry logic")           # full hook added the contract

@@ -610,6 +610,47 @@ def install(args: argparse.Namespace) -> None:
     print("did not exist when your session began, restart it or open /hooks once.")
 
 
+def install_cloud(args: argparse.Namespace) -> None:
+    """
+    Make cloud sessions (claude.ai/code) in another repository run these hooks.
+
+    Cloud VMs never read ~/.claude, so the repository has to carry them: copies
+    scripts/cloud-repo.sh to <repo>/.claude/jev-cloud.sh and merges hook entries
+    into <repo>/.claude/settings.json, keeping everything else there. Locally the
+    script is a no-op, so the user-scope install never runs twice.
+    """
+    repo = Path(args.repo).expanduser().resolve()
+    if not (repo / ".git").exists():
+        raise SystemExit(f"{repo} is not a git repository")
+    dry = args.dry_run
+    rel = ".claude/jev-cloud.sh"
+
+    def entry(sub: str, msg: str, timeout: int = 30) -> dict:
+        return {"type": "command", "command": f'bash "$CLAUDE_PROJECT_DIR/{rel}" {sub}',
+                "timeout": timeout, "statusMessage": msg}
+
+    ours = {
+        "SessionStart": [{"hooks": [entry("session", "jev: activating hooks", 300)]}],
+        "UserPromptSubmit": [{"hooks": [entry("prompt", "jev: evaluating prompt")]}],
+        "PreToolUse": [
+            {"matcher": "Bash", "hooks": [entry("gate-bash", "jev: gating command")]},
+            {"matcher": "Agent|Task", "hooks": [entry("route-agent", "jev: routing subagent")]},
+        ],
+        "PostToolUse": [{"matcher": "Agent|Task", "hooks": [entry("agent-outcome", "jev: recording outcome")]}],
+        "PostToolUseFailure": [{"matcher": "Agent|Task",
+                                "hooks": [entry("agent-outcome", "jev: recording outcome")]}],
+    }
+    settings = repo / ".claude" / "settings.json"
+    current = json.loads(settings.read_text(encoding="utf-8")) if settings.is_file() else {}
+    merged = _merge_hooks(current, ours, rel)
+    if not dry:
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(HERE / "scripts" / "cloud-repo.sh", repo / rel)
+        settings.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    verb = "would write" if dry else "wrote"
+    print(f"cloud    — {verb} {repo / rel} and {settings}")
+
+
 # ---------------------------------------------------------------------- main
 
 HANDLERS = {"prompt": prompt, "gate-bash": gate_bash, "route-agent": route_agent,
@@ -631,6 +672,9 @@ def main(argv: list[str] | None = None) -> None:
     ins = sub.add_parser("install")
     ins.add_argument("--home", default="~", help="Home directory to install into (tests).")
     ins.add_argument("--dry-run", action="store_true")
+    cl = sub.add_parser("install-cloud", help="Carry the hooks into a repo for cloud sessions.")
+    cl.add_argument("--repo", required=True)
+    cl.add_argument("--dry-run", action="store_true")
     rep = sub.add_parser("report")
     rep.add_argument("--dir", default=None, help="Trace directory (default: $JEV_TRACE_DIR).")
 
@@ -644,6 +688,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "install":
         install(args)
+        return
+    if args.cmd == "install-cloud":
+        install_cloud(args)
         return
     if args.cmd == "report":
         print(json.dumps(report(Path(args.dir) if args.dir else None), indent=2))
