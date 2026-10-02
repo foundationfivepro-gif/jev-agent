@@ -345,10 +345,9 @@ def jev_route_model(
     Fails toward capability — below 75% confidence the
     strongest ordinary tier Jev gave at least 20% weight is returned, Opus only from 40% (weight on
     Fable or human means Opus), except on mechanical tasks (complexity under 0.5) where a cheap
-    tier is accepted from 50% — and Fable is escalation-only: it comes back
-    when Jev proposes it with confidence for frontier-complexity architecture
-    or design, never as the fallback for an uncertain route. `human` means do
-    not delegate.
+    tier is accepted from 50% — and Fable is never selected, even on a
+    confident proposal (that means Opus); set it explicitly to use it.
+    `human` means do not delegate.
     """
     _require_key()
     if not task.strip():

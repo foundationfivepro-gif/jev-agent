@@ -75,8 +75,8 @@ still falls short — the same shape as the router's fallback. Within one model,
 a better lever than switching tiers.
 
 **Fable is the top of the range, not a cheap tier.** It costs 2.5× Opus. It is
-escalation-only: the router returns it when Jev proposes it with confidence, never as the
-fallback for an uncertain route and never as a default for routine subtasks.
+explicit-only: the router never returns it, even on a confident proposal (that means Opus).
+Use it only by setting the model yourself for a task that specifically calls for it.
 
 In Claude Code the Agent hook does this on every spawn that sets no `model`, and appends a
 return contract to the prompt, so the parent reads a conclusion instead of a transcript.
