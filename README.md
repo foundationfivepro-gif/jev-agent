@@ -58,7 +58,7 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 |---|---|---|
 | read less | `jev_select_context` before reading files | 508k → 3.9k tokens on a 188-file repo |
 | short subagent returns | `route-agent` appends a return contract to every subagent prompt: conclusion only, file:line references, under 250 words | the parent reads, and keeps in context for the rest of the session, a conclusion instead of a transcript |
-| cheapest sufficient model | `route-agent` routes every spawn without an explicit `model` | Haiku at a fifth of Opus's price where it passes; Fable never, unless set explicitly |
+| cheapest sufficient model | `route-agent` routes every spawn without an explicit `model` | Sonnet first, Opus only when Jev's weight on it pays for skipping Sonnet; Haiku on mechanical work; Fable never, unless set explicitly |
 | no duplicate decisions | the policy tells Claude the hooks already gate commands and route spawns, so it does not also call `jev_gate_command` / `jev_route_model` | one tool round-trip and one Jev call per command and per spawn |
 | quiet by default | the per-prompt note is injected only when repository context is needed | nothing added to context on prompts that need no files |
 | small fixed cost | policy under 2,000 characters (loads into every session and subagent); tool descriptions cut from ~11k to ~6.7k characters | paid once per session and per subagent |

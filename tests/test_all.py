@@ -412,7 +412,7 @@ def test_remote_refuses_to_serve_without_a_token():
 # ---------------------------------------------------------------- model routing
 
 def test_route_model_uncertain_route_never_escalates_to_fable(monkeypatch):
-    """Fail toward capability means Opus. Fable is escalation-only: proposed, never defaulted."""
+    """Fable is never selected; an uncertain route lands on the Sonnet floor."""
     import model_router
 
     class Answer:
@@ -428,17 +428,27 @@ def test_route_model_uncertain_route_never_escalates_to_fable(monkeypatch):
 
     monkeypatch.setattr(model_router, "write_trace", lambda *a, **k: None)
 
-    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.3))
-    assert model_router.route_model("anything")["selected"] == "opus"
+    seen = {}
+
+    def capture(s, q):
+        seen.update(q["model"].criteria)
+        return Result("fable", 0.3)
+
+    monkeypatch.setattr(model_router, "decide", capture)
+    assert model_router.route_model("anything")["selected"] == "sonnet"
+    # Neither Fable nor a "stop and ask a person" option is ever offered.
+    assert "fable" not in seen and "human" not in seen
 
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.4))
-    assert model_router.route_model("anything")["selected"] == "opus"
+    assert model_router.route_model("anything")["selected"] == "sonnet"
 
+    # A confident proposal of an unoffered tier still lands on the floor.
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.9))
-    # Even a confident Fable proposal lands on Opus unless explicitly allowed.
     d = model_router.route_model("anything")
-    assert d["selected"] == "opus" and d["fallback"] == "escalation_only"
-    assert model_router.route_model("anything", allow_escalation=True)["selected"] == "fable"
+    assert d["selected"] == "sonnet" and d["fallback"] == "not_eligible"
+    # A catalog with only Fable has no automatic route at all.
+    only = {"fable": model_router.DEFAULT_CATALOG["fable"]}
+    assert model_router.route_model("anything", catalog=only)["selected"] is None
 
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.9))
     assert model_router.route_model("anything")["selected"] == "haiku"
@@ -466,17 +476,15 @@ def test_route_model_mechanical_tasks_accept_cheap_tier_at_lower_bar(monkeypatch
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 0.2))
     assert route("x")["selected"] == "haiku"           # mechanical: 0.55 is enough
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.55, 1.0))
-    assert route("x")["selected"] == "opus"            # standard: 0.75 still applies
+    assert route("x")["selected"] == "sonnet"          # standard: 0.75 still applies
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.4, 0.2))
-    assert route("x")["selected"] == "opus"            # mechanical but a coin flip
+    assert route("x")["selected"] == "sonnet"          # mechanical but a coin flip
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.55, 0.2))
-    assert route("x")["selected"] == "opus"            # the lower bar never reaches Fable
-    monkeypatch.setattr(model_router, "decide", lambda s, q: Result("human", 0.55, 0.2))
-    assert route("x")["selected"] == "opus"            # nor does it accept 'human' cheaply
+    assert route("x")["selected"] == "sonnet"          # the lower bar never reaches Fable
 
 
-def test_route_model_uncertain_fallback_stops_at_strongest_tier_considered(monkeypatch):
-    """A sonnet-vs-haiku split never needed Opus; weight on Opus, Fable or human still does."""
+def test_route_model_uncertain_route_is_sonnet_first(monkeypatch):
+    """Opus wins an uncertain route only when its weight pays for skipping Sonnet."""
     import model_router
 
     class Answer:
@@ -498,16 +506,23 @@ def test_route_model_uncertain_fallback_stops_at_strongest_tier_considered(monke
 
     # Real traces from 2026-09-22 that used to escalate to Opus.
     assert route("sonnet", 0.54, {"sonnet": 0.63, "haiku": 0.37}) == "sonnet"
-    # Opus needs 40% to win an uncertain route (2026-10-01): a minority vote stays on the proposal.
+    # Opus costs 2x Sonnet, so Sonnet-then-Opus is cheaper in expectation below 50% on Opus.
+    assert model_router.climb_mass(model_router.DEFAULT_CATALOG, "sonnet", "opus") == 0.5
     assert route("sonnet", 0.67, {"sonnet": 0.75, "opus": 0.25}) == "sonnet"
-    assert route("sonnet", 0.59, {"sonnet": 0.68, "opus": 0.32}) == "sonnet"
-    assert route("sonnet", 0.55, {"sonnet": 0.58, "opus": 0.42}) == "opus"
+    assert route("sonnet", 0.55, {"sonnet": 0.58, "opus": 0.42}) == "sonnet"
+    # Real traces 2026-09-25..10-01 that climbed to Opus while Jev preferred Sonnet.
+    assert route("sonnet", 0.44, {"opus": 0.44, "sonnet": 0.55}) == "sonnet"
+    assert route("opus", 0.38, {"sonnet": 0.49, "opus": 0.50}) == "opus"
+    assert route("opus", 0.45, {"opus": 0.56, "sonnet": 0.44}) == "opus"
     assert route("haiku", 0.40, {"haiku": 0.6, "sonnet": 0.3, "opus": 0.1}) == "sonnet"
-    # Mass on a tier outside the ordinary set means "hard": strongest ordinary, never Fable.
-    assert route("sonnet", 0.5, {"sonnet": 0.5, "fable": 0.3, "haiku": 0.2}) == "opus"
-    assert route("sonnet", 0.5, {"sonnet": 0.55, "human": 0.25, "haiku": 0.2}) == "opus"
-    # No probabilities to reason about: unchanged behaviour.
-    assert route("sonnet", 0.5, {}) == "opus"
+    # Weight on an unoffered tier is not weight on Opus.
+    assert route("sonnet", 0.5, {"sonnet": 0.5, "fable": 0.3, "haiku": 0.2}) == "sonnet"
+    # No probabilities to reason about: the floor.
+    assert route("sonnet", 0.5, {}) == "sonnet"
+    # The break-even follows the price list, not a constant.
+    pricey = {k: dict(v) for k, v in model_router.DEFAULT_CATALOG.items()}
+    pricey["opus"]["cost_out"] = 40.0
+    assert route("sonnet", 0.6, {"sonnet": 0.4, "opus": 0.6}, catalog=pricey) == "sonnet"
 
 
 def test_route_model_is_exposed_remotely():
@@ -535,10 +550,13 @@ import sys as _sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _hook(sub, payload, tmp_path):
+def _hook(sub, payload, tmp_path, env=None):
     """Run a hook with NO key available, so nothing here touches the network."""
-    env = {k: v for k, v in os.environ.items() if k not in ("OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY")}
+    extra = env or {}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY", "JEV_MODELS")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
+    env.update(extra)
     return subprocess.run(
         [_sys.executable, os.path.join(ROOT, "hooks.py"), sub],
         input=json.dumps(payload), capture_output=True, text=True, env=env, cwd=ROOT, timeout=60,
@@ -696,9 +714,13 @@ def test_hook_route_agent_adds_return_contract_once_without_a_key(tmp_path):
     out = json.loads(r.stdout)["hookSpecificOutput"]
     prompt = out["updatedInput"]["prompt"]
     assert prompt.startswith("find the retry logic") and prompt.count(hooks.RETURN_MARK) == 1
-    assert "model" not in out["updatedInput"]
+    # No key is never a stop, nor an inherited (possibly Opus or Fable) parent model.
+    assert out["updatedInput"]["model"] == "sonnet"
     again = _hook("route-agent", {"tool_input": {"prompt": prompt}}, tmp_path)
-    assert again.returncode == 0 and again.stdout == ""
+    out = json.loads(again.stdout)["hookSpecificOutput"]["updatedInput"]
+    assert out["prompt"].count(hooks.RETURN_MARK) == 1 and out["model"] == "sonnet"
+    kept = _hook("route-agent", {"tool_input": {"prompt": prompt, "model": "fable"}}, tmp_path)
+    assert kept.stdout == ""                       # an explicit model is untouched
 
 
 def test_hook_prompt_never_breaks_submission(tmp_path):
@@ -950,7 +972,7 @@ def test_router_menu_is_what_the_account_has(monkeypatch):
     monkeypatch.setenv("JEV_MODELS", "haiku, sonnet")
     assert sorted(available_catalog()) == ["haiku", "sonnet"]
     monkeypatch.setenv("JEV_MODELS", "nothing-real")
-    assert "opus" in available_catalog()          # a typo must not empty the menu
+    assert available_catalog() == {}              # a restriction is never widened
     monkeypatch.delenv("JEV_MODELS")
     assert "fable" in available_catalog()
 
@@ -1065,7 +1087,139 @@ def test_unreachable_errors_name_a_fallback(monkeypatch, server):
     import importlib
     mod = importlib.import_module(server)
     _jev_down(monkeypatch, mod)
-    with pytest.raises(ValueError, match="Fallback: delegate without setting a model"):
-        mod.jev_route_model("rename a variable")
+    d = mod.jev_route_model("rename a variable")   # an outage routes to Sonnet, never a stop
+    assert d.selected == "sonnet" and d.source == "fallback"
     with pytest.raises(ValueError, match="Fallback: apply the default"):
         mod.jev_evaluate({"x": 1}, [{"id": "ok", "type": "boolean", "instructions": "is it ok"}])
+
+
+def test_agent_outcome_counts_a_background_launch_as_background(tmp_path, monkeypatch):
+    """Spawns default to background: a launch with nothing to return yet is not a failure."""
+    import core
+    import hooks
+    monkeypatch.setattr(core, "TRACE_DIR", tmp_path)
+    seen = []
+    monkeypatch.setattr(core, "write_trace", lambda *a, **k: seen.append(a[3]))
+    hooks.agent_outcome({"tool_use_id": "t", "tool_input": {"model": "sonnet"},
+                         "tool_response": {"status": "async_launched", "agentId": "a1"}})
+    hooks.agent_outcome({"tool_use_id": "u", "tool_input": {"model": "sonnet"},
+                         "tool_response": {"content": []}})
+    assert [r["status"] for r in seen] == ["background", "empty"]
+    assert seen[0]["response_keys"] == ["agentId", "status"]      # shape only, never values
+
+
+@pytest.mark.parametrize("server", ["mcp_server", "remote_server"])
+def test_route_fallback_never_restores_excluded_models(monkeypatch, server):
+    """No route falls back inside the same eligibility the router used: no Fable, no ceiling breach."""
+    import importlib
+    import model_router
+    mod = importlib.import_module(server)
+    monkeypatch.setattr(mod, "active_transport", lambda: None)
+    only = {"fable": model_router.DEFAULT_CATALOG["fable"]}
+    with pytest.raises(ValueError, match="inline"):
+        mod._route_or_floor("x", only)
+    cheap = mod._route_or_floor("x", model_router.DEFAULT_CATALOG, max_cost_in=1.0)
+    assert cheap["selected"] == "haiku" and cheap["source"] == "fallback"
+
+
+def test_hook_floor_without_sonnet_is_still_an_explicit_model(tmp_path):
+    """A restricted menu without Sonnet must not hand the spawn the parent's model."""
+    for menu, want in (("haiku", "haiku"), ("opus", "opus"), ("haiku,opus", "opus")):
+        r = _hook("route-agent", {"tool_input": {"prompt": "find the retry logic"}}, tmp_path,
+                  env={"JEV_MODELS": menu})
+        assert json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == want, menu
+
+
+@pytest.mark.parametrize("error", ["TransportError", "InvalidResponse"])
+def test_hook_jev_outage_still_routes_to_the_floor(monkeypatch, tmp_path, error):
+    """An outage mid-route must end in an explicit model, never a crash or an inherited one."""
+    import core
+    import hooks
+    import model_router
+    monkeypatch.setattr(core, "TRACE_DIR", tmp_path)
+    monkeypatch.delenv("JEV_MODELS", raising=False)
+    monkeypatch.setattr(hooks, "_have_key", lambda: True)
+
+    def down(*a, **k):
+        raise getattr(core, error)("test outage")
+
+    monkeypatch.setattr(model_router, "route_model", down)
+    out = []
+    monkeypatch.setattr(hooks, "_emit", out.append)
+    hooks.route_agent({"tool_input": {"prompt": "find the retry logic"}})
+    updated = out[0]["hookSpecificOutput"]["updatedInput"]
+    assert updated["model"] == "sonnet" and hooks.RETURN_MARK in updated["prompt"]
+
+
+def test_hook_honours_a_model_restriction_set_in_env_file(tmp_path):
+    """JEV_MODELS in .env counts even when routing is skipped (no key, secret-looking prompt)."""
+    envfile = tmp_path / "jev.env"
+    envfile.write_text("JEV_MODELS=haiku\n")
+    for prompt in ("find the retry logic", "use sk-ant-api03-" + "x" * 40):
+        r = _hook("route-agent", {"tool_input": {"prompt": prompt}}, tmp_path,
+                  env={"JEV_ENV_FILE": str(envfile)})
+        assert json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "haiku", prompt
+
+
+def test_hook_floor_survives_unwritable_traces_and_the_deadline(monkeypatch, tmp_path):
+    """Neither a trace write failing nor the hook deadline may leave the model unset."""
+    import core
+    import hooks
+    import model_router
+    monkeypatch.delenv("JEV_MODELS", raising=False)
+    monkeypatch.setattr(hooks, "_have_key", lambda: True)
+
+    def down(*a, **k):
+        raise core.TransportError("outage")
+
+    def no_disk(*a, **k):
+        raise PermissionError("read-only trace dir")
+
+    monkeypatch.setattr(model_router, "route_model", down)
+    monkeypatch.setattr(core, "write_trace", no_disk)
+    out = []
+    monkeypatch.setattr(hooks, "_emit", out.append)
+    hooks.route_agent({"tool_input": {"prompt": "find the retry logic"}})
+    assert out[-1]["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+
+    def slow(*a, **k):    # the deadline fires while Jev is still thinking
+        assert hooks._FALLBACK["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+        return {"selected": "opus", "confidence": 0.9, "proposed": "opus"}
+
+    monkeypatch.setattr(model_router, "route_model", slow)
+    hooks.route_agent({"tool_input": {"prompt": "find the retry logic"}})
+    assert out[-1]["hookSpecificOutput"]["updatedInput"]["model"] == "opus"
+
+
+def test_route_decision_survives_unwritable_traces(monkeypatch):
+    """A successful route is kept when the trace cannot be written."""
+    import model_router
+
+    class Answer:
+        value, certainty, probabilities = "opus", 0.9, {"opus": 0.9}
+
+    class Result:
+        answers = {"model": Answer()}
+
+        def value(self, _):
+            return 2.0
+
+    def no_disk(*a, **k):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(model_router, "write_trace", no_disk)
+    monkeypatch.setattr(model_router, "decide", lambda s, q: Result())
+    assert model_router.route_model("x")["selected"] == "opus"
+
+
+@pytest.mark.parametrize("server", ["mcp_server", "remote_server"])
+def test_mcp_route_floors_on_any_router_failure(monkeypatch, server):
+    import importlib
+    mod = importlib.import_module(server)
+    monkeypatch.setattr(mod, "active_transport", lambda: object())
+
+    def broken(*a, **k):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(mod, "route_model", broken)
+    assert mod._route_or_floor("x", mod.DEFAULT_CATALOG)["selected"] == "sonnet"
