@@ -435,7 +435,10 @@ def test_route_model_uncertain_route_never_escalates_to_fable(monkeypatch):
     assert model_router.route_model("anything")["selected"] == "opus"
 
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("fable", 0.9))
-    assert model_router.route_model("anything")["selected"] == "fable"
+    # Even a confident Fable proposal lands on Opus unless explicitly allowed.
+    d = model_router.route_model("anything")
+    assert d["selected"] == "opus" and d["fallback"] == "escalation_only"
+    assert model_router.route_model("anything", allow_escalation=True)["selected"] == "fable"
 
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result("haiku", 0.9))
     assert model_router.route_model("anything")["selected"] == "haiku"

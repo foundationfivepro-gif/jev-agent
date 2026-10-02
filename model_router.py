@@ -50,8 +50,10 @@ MIN_TOP_TIER_FALLBACK_MASS = 0.4
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
 # Fits follow Anthropic's model selection matrix (docs: choosing-a-model).
 # Fable is the top of the range, not a cheap tier: it costs 2.5x Opus. It is
-# escalation_only — Jev may propose it with confidence, but an *uncertain* route
-# falls back to an ordinary tier (at most Opus), never up to Fable.
+# escalation_only — the router never selects it, even on a confident proposal
+# (owner decision 2026-10-02: Fable was for one dev effort). A caller that wants
+# it sets the model explicitly, or passes allow_escalation=True. Jev's weight on
+# it still counts as a signal the task is hard, which means Opus.
 DEFAULT_CATALOG: dict[str, dict] = {
     "haiku":  {"id": "claude-haiku-4-5",
                "fit": "Classification, formatting, simple mechanical edits, "
@@ -145,6 +147,7 @@ def route_model(
     needs_browser: bool = False,
     max_cost_in: float = 1e9,
     min_confidence: float = MIN_CONFIDENCE,
+    allow_escalation: bool = False,
     trace_meta: Mapping[str, str] | None = None,
 ) -> dict:
     """
@@ -208,6 +211,8 @@ def route_model(
         fallback = None if selected == proposed else "low_confidence"
     if selected not in eligible and selected != "human":
         selected, fallback = strongest, "not_eligible"
+    if not allow_escalation and eligible.get(selected, {}).get("escalation_only"):
+        selected, fallback = strongest, "escalation_only"
 
     decision = {
         "selected": selected,

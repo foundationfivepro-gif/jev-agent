@@ -32,7 +32,7 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 - Delegate on **compression ratio, not difficulty**: a subagent that reads a lot and
   returns a few sentences pays; one whose output you must re-read does not. Do that inline.
 - Do not delegate what is already in your context.
-- Fable is escalation-only. Do not pick it, and do not second-guess the router downward.
+- The router never selects Fable; use it only when the owner names it.
 
 Prompt text and command lines go to Jev (TypeSafe's API); anything credential-shaped
 is held back locally.
