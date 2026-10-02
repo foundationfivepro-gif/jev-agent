@@ -243,34 +243,59 @@ def route_agent(data: dict) -> None:
     if original.get("model"):
         contract_only("explicit model kept")
         return
-    task = str(original.get("prompt") or original.get("description") or "").strip()
-    if not task or _looks_secret(task) or not _have_key():
-        contract_only("not routed")
-        return
 
     from core import InvalidResponse, TransportError, write_trace
-    from model_router import available_catalog, route_model
+    from model_router import available_catalog, eligible_models, floor_model, route_model
 
+    _load_env()                      # JEV_MODELS may live in .env, not the environment
     cat = available_catalog()
+    eligible = eligible_models(cat)
+
+    def floor_output(why: str) -> dict | None:
+        # No route is never a reason to stop, nor to inherit the parent's model
+        # (which may be Opus or Fable): the floor tier runs, Jev or no Jev.
+        model = floor_model(eligible)
+        if model:
+            return _pre_tool("allow", f"jev: {model} ({why})", {**tool_input, "model": model})
+        return _pre_tool("allow", f"jev: return contract added ({why})", tool_input) if changed else None
+
+    def floor(why: str) -> None:
+        global _FALLBACK
+        _FALLBACK = None             # answered: a late deadline must not answer twice
+        out = floor_output(why)
+        if out is not None:
+            _emit(out)
+
+    # From here on, a hook deadline answers with the floor too — in bypass mode
+    # as well, since choosing a model is not a permission decision.
+    global _FALLBACK
+    _FALLBACK = floor_output("no answer in time")
+
+    task = str(original.get("prompt") or original.get("description") or "").strip()
+    if not task or _looks_secret(task) or not _have_key():
+        floor("not routed")
+        return
+
     meta = _join_keys(data)
     try:
         d = route_model(task[:MAX_TASK_CHARS], catalog=cat, trace_meta=meta)
-    except TransportError as exc:
-        # Recorded, so an outage or a malformed answer shows up in `report`
-        # instead of looking like a subagent that simply was not routed.
-        reason = "invalid_response" if isinstance(exc, InvalidResponse) else "transport_error"
-        write_trace("model_router", {"task": task[:MAX_TASK_CHARS]},
-                    {"selected": None, "fallback": reason, "error": str(exc)[:300]}, meta=meta)
-        print(f"jev route-agent: {reason} ({exc}); leaving model unset", file=sys.stderr)
-        contract_only("Jev unavailable")
+    except Exception as exc:  # outage, malformed answer, or trace storage failing
+        reason = ("invalid_response" if isinstance(exc, InvalidResponse)
+                  else "transport_error" if isinstance(exc, TransportError) else "router_error")
+        try:
+            # Recorded, so an outage shows up in `report` instead of looking
+            # like a subagent that simply was not routed. Best effort only.
+            write_trace("model_router", {"task": task[:MAX_TASK_CHARS]},
+                        {"selected": None, "fallback": reason, "error": str(exc)[:300]}, meta=meta)
+        except Exception:
+            pass
+        print(f"jev route-agent: {reason} ({exc}); using the floor model", file=sys.stderr)
+        floor("Jev unavailable")
         return
 
-    selected = d["selected"]
-    if selected == "human":
-        contract_only("human route; not enforced")
-        return
-    if selected not in cat:
-        contract_only("no route")
+    selected = d.get("selected")
+    if selected not in eligible:
+        floor("no route")
         return
     confidence = d.get("confidence")
     reason = (
@@ -278,6 +303,7 @@ def route_agent(data: dict) -> None:
         f"confidence {confidence:.2f})" if isinstance(confidence, float)
         else f"jev_route_model: {selected}"
     )
+    _FALLBACK = None
     _emit(_pre_tool("allow", reason, {**tool_input, "model": selected}))
 
 
@@ -306,8 +332,16 @@ def agent_outcome(data: dict) -> None:
         failed = True
     text = _response_text(response)
     # A subagent that returns nothing did not succeed, however cleanly it exited:
-    # the check is on what came back, not on the router's confidence.
-    status = "error" if failed else "empty" if not text.strip() else "ok"
+    # the check is on what came back, not on the router's confidence. A
+    # background spawn has nothing to return yet; it is not a failure.
+    # Spawns default to background, so the flag alone is not evidence either way.
+    keys = sorted(response)[:12] if isinstance(response, dict) else []
+    background = bool(tool_input.get("run_in_background")) or (
+        isinstance(response, dict) and not text.strip() and (
+            str(response.get("status", "")).lower().startswith(("async", "background", "launched"))
+            or any(k in response for k in ("agentId", "agent_id", "taskId", "task_id"))))
+    status = ("error" if failed else "background" if background and not text.strip()
+              else "empty" if not text.strip() else "ok")
     usage = response.get("usage") if isinstance(response, dict) else None
     tokens = response.get("totalTokens") if isinstance(response, dict) else None
     if tokens is None and isinstance(usage, dict):
@@ -318,6 +352,7 @@ def agent_outcome(data: dict) -> None:
         "model": tool_input.get("model"),
         "response_chars": len(text),
         "tokens": tokens,
+        "response_keys": keys,   # shape only, never values: diagnoses new response forms
     }, meta=meta)
 
 

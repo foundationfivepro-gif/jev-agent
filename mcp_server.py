@@ -36,7 +36,9 @@ from context_tier import Chunk, select  # noqa: E402
 from core import (  # noqa: E402
     Choice, Noul, Score, TransportError, active_transport, decide, load_env, unreachable,
 )
-from model_router import DEFAULT_CATALOG, route_model  # noqa: E402
+from model_router import (  # noqa: E402
+    DEFAULT_CATALOG, available_catalog, eligible_models, floor_model, route_model,
+)
 from permission_gate import extract_commands, gate, triage  # noqa: E402
 from security_router import LABEL_NAMES, classify  # noqa: E402
 from symbols import extract as extract_symbols  # noqa: E402
@@ -168,21 +170,40 @@ class ActionPolicyDecision(BaseModel):
     confidence: float
 
 
+def _route_or_floor(task: str, cat: dict, **kw) -> dict:
+    """Route with Jev; with no key, no answer or no route, the floor tier."""
+    eligible = eligible_models(cat, **kw)
+    d = None
+    if active_transport():
+        try:
+            d = route_model(task, catalog=cat, **kw)
+        except Exception:  # outage or anything else: the floor, never a stop
+            d = None
+    if d is None or d.get("selected") not in eligible:
+        floor = floor_model(eligible)
+        if floor is None:
+            raise ValueError("No model is eligible to route to (JEV_MODELS, the catalog or "
+                             "max_cost_in excludes all). Do the work inline; do not stop.")
+        d = {"selected": floor, "proposed": None, "confidence": 0.0, "complexity": None,
+             "probabilities": {}, "source": "fallback"}
+    return d
+
+
 class ModelRouteDecision(BaseModel):
     """Which executor model to hand a task to."""
 
     selected: str = Field(description=(
-        "Pass as the Agent tool's model: haiku, sonnet, opus, fable — or 'human' "
-        "when none should attempt it unaided."
+        "Pass as the Agent tool's model: haiku, sonnet or opus. Always a model: "
+        "routing never stops work."
     ))
-    model_id: str | None = Field(description="API model id for `selected`; null for 'human'.")
+    model_id: str | None = Field(description="API model id for `selected`.")
     proposed: str | None = Field(description="What Jev proposed before the confidence gate.")
     confidence: float = Field(description="Jev's certainty in `proposed`, 0..1.")
     complexity: float | None = Field(
         description="0=mechanical, 1=standard, 2=multi-step, 3=frontier."
     )
     probabilities: dict[str, float] = Field(description="Probability mass per candidate.")
-    source: Literal["policy", "model"]
+    source: Literal["policy", "model", "fallback"]
     cost_per_mtok: dict[str, float] = Field(
         description="{'in': .., 'out': ..} USD per million tokens for `selected`."
     )
@@ -227,7 +248,8 @@ def jev_select_context(
     """
     Choose which files to read for a goal, before reading any. Call FIRST in an
     unfamiliar repository: scores paths and exported symbols (never contents) into
-    read-in-full, index and ignore (188 files: 195k tokens -> 4k). Never read `index`.
+    read-in-full, index and ignore (188 files: 195k tokens -> 4k). Read `include` first; read an `index` file when the
+    task names it or needs it. If selection is unavailable, continue ordinary local discovery.
     """
     _require_key()
     base = Path(root).expanduser().resolve()
@@ -528,21 +550,16 @@ def jev_route_model(
     Cheapest model that should pass a subtask. The Agent hook already does this
     for every spawn without an explicit model; call it only where no hook runs.
 
-    Pass `selected` as the model. Below 75% confidence it returns the strongest
-    tier Jev gave 20% weight, Opus only from 40% (mechanical tasks: cheap tier
-    accepted from 50%).
-    Fable is never selected; set it explicitly to use it. `human` means do not delegate.
+    Pass `selected` as the model. Below 75% confidence it returns Sonnet unless
+    Jev's weight on Opus pays for skipping Sonnet (50% at today's prices);
+    mechanical tasks accept a cheap tier from 50%. Fable is never selected;
+    set it explicitly to use it. Jev unavailable means Sonnet, never a stop.
     """
-    _require_key()
     if not task.strip():
         raise ValueError("task is empty")
 
-    cat = catalog or DEFAULT_CATALOG
-    try:
-        d = route_model(task, catalog=cat)
-    except TransportError as exc:
-        raise unreachable(exc, "delegate without setting a model; the session default "
-                           "applies.") from exc
+    cat = available_catalog(catalog if catalog is not None else DEFAULT_CATALOG)
+    d = _route_or_floor(task, cat)
 
     chosen = cat.get(d["selected"], {})
     return ModelRouteDecision(

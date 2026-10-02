@@ -7,8 +7,8 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 
 ## Call these yourself
 
-- **Before reading files to find something:** `jev_select_context`. Read only `include`;
-  never read `index`.
+- **Before reading files to find something:** `jev_select_context`. Read `include`;
+  `index` only when needed.
 - **Before sending file contents to a third party:** `jev_classify_data`. `secret` means stop.
 - **Before an action with external effect** (send, post, delete, pay, deploy):
   `jev_check_action`.
@@ -24,15 +24,14 @@ since each is a tool round-trip in your context plus a second Jev call. With no 
 
 - Before an outbound command (push, curl, deploy): `jev_gate_command`.
   Never run a `policy` block; a model verdict is advice to the permission mode.
-- Before delegating: `jev_route_model`; use `selected` as the model (`human`: don't
-  delegate), and end the subagent prompt by asking for the conclusion only.
+- Before delegating: `jev_route_model`; use `selected` as the model, and end the subagent prompt by asking for the conclusion only.
 
 ## Delegating
 
 - Delegate on **compression ratio, not difficulty**: a subagent that reads a lot and
   returns a few sentences pays; one whose output you must re-read does not. Do that inline.
 - Do not delegate what is already in your context.
-- The router never selects Fable; use it only when the owner names it.
+- Sonnet first; set `opus` only when Sonnet falls short. Fable only when the owner names it.
 
 Prompt text and command lines go to Jev (TypeSafe's API); anything credential-shaped
 is held back locally.
