@@ -12,7 +12,8 @@ set -u
 JEV="${JEV_AGENT_DIR:-$HOME/.jev-agent}"
 SUB="${1:-}"
 
-if [ "$SUB" = "session" ] && [ ! -f "$JEV/hooks.py" ]; then
+# The MCP server can start before the SessionStart hook, so either one clones.
+if { [ "$SUB" = "session" ] || [ "$SUB" = "mcp" ]; } && [ ! -f "$JEV/hooks.py" ]; then
   git clone -q --depth 1 https://github.com/foundationfivepro-gif/jev-agent.git "$JEV" \
     >/dev/null 2>&1 || echo "jev: jev-agent not reachable; subagents default to sonnet" >&2
 fi
@@ -38,6 +39,9 @@ print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
 if [ ! -f "$JEV/scripts/cloud.sh" ]; then
   [ "$SUB" = "route-agent" ] && floor
   exit 0
+fi
+if [ "$SUB" = "mcp" ]; then
+  exec bash "$JEV/scripts/cloud.sh" mcp
 fi
 if [ "$SUB" != "route-agent" ]; then
   exec bash "$JEV/scripts/cloud.sh" hook "$SUB"

@@ -616,8 +616,9 @@ def install_cloud(args: argparse.Namespace) -> None:
 
     Cloud VMs never read ~/.claude, so the repository has to carry them: copies
     scripts/cloud-repo.sh to <repo>/.claude/jev-cloud.sh and merges hook entries
-    into <repo>/.claude/settings.json, keeping everything else there. Locally the
-    script is a no-op, so the user-scope install never runs twice.
+    into <repo>/.claude/settings.json, keeping everything else there, and registers
+    the jev MCP server in <repo>/.mcp.json so the jev_* tools exist there too.
+    Locally the script is a no-op, so the user-scope install never runs twice.
     """
     repo = Path(args.repo).expanduser().resolve()
     if not (repo / ".git").exists():
@@ -643,12 +644,20 @@ def install_cloud(args: argparse.Namespace) -> None:
     settings = repo / ".claude" / "settings.json"
     current = json.loads(settings.read_text(encoding="utf-8")) if settings.is_file() else {}
     merged = _merge_hooks(current, ours, rel)
+    enabled = merged.setdefault("enabledMcpjsonServers", [])
+    if "jev" not in enabled:
+        enabled.append("jev")
+    mcp = repo / ".mcp.json"
+    servers = json.loads(mcp.read_text(encoding="utf-8")) if mcp.is_file() else {}
+    servers.setdefault("mcpServers", {})["jev"] = {
+        "command": "bash", "args": [f"${{CLAUDE_PROJECT_DIR:-.}}/{rel}", "mcp"]}
     if not dry:
         settings.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(HERE / "scripts" / "cloud-repo.sh", repo / rel)
         settings.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        mcp.write_text(json.dumps(servers, indent=2) + "\n", encoding="utf-8")
     verb = "would write" if dry else "wrote"
-    print(f"cloud    — {verb} {repo / rel} and {settings}")
+    print(f"cloud    — {verb} {repo / rel}, {settings} and {mcp}")
 
 
 # ---------------------------------------------------------------------- main

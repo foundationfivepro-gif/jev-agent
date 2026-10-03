@@ -1284,6 +1284,9 @@ def test_install_cloud_merges_into_a_repo_and_is_idempotent(tmp_path):
     assert any(g.get("matcher") == "Edit" for g in s["hooks"]["PreToolUse"])
     assert (repo / ".claude" / "jev-cloud.sh").read_text() == open(
         os.path.join(ROOT, "scripts", "cloud-repo.sh")).read()
+    assert s["enabledMcpjsonServers"] == ["jev"]
+    m = json.loads((repo / ".mcp.json").read_text())
+    assert m["mcpServers"]["jev"]["args"][-2:] == ["${CLAUDE_PROJECT_DIR:-.}/.claude/jev-cloud.sh", "mcp"]
 
 
 def _cloud_script(sub, payload, env):
