@@ -146,6 +146,16 @@ The VM has no `.env`, and the default **Trusted** network does not reach
   and keep the default package-manager list. Anyone who can use the environment can
   read the variable.
 
+**claude.ai Projects threads** start in a parent folder (`/home/user`) with each repo
+cloned under it, so the repo-level files above are never read. Install at user scope
+from the environment's **Setup script** instead:
+
+    bash "$(ls -d /home/user/jev-agent ~/jev-agent 2>/dev/null | head -1)/scripts/cloud-user.sh"
+
+`scripts/cloud-user.sh` copies the repo to `~/.jev-agent`, installs requirements,
+skills and hooks, and registers `jev` in `~/.claude.json`. `cloud.sh` then stands
+down so nothing runs twice.
+
 Without a key the session still starts: the deterministic Bash hard block and the
 subagent return contract hold, and the SessionStart line reports `routing off (no key)`.
 

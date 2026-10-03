@@ -13,6 +13,8 @@
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE=false; [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] && REMOTE=true
+# scripts/cloud-user.sh already runs both at user scope; don't run them twice.
+if [ -d "$HOME/.jev-agent" ] && [ "$ROOT" != "$HOME/.jev-agent" ]; then REMOTE=false; fi
 
 have_deps() { python3 -c "import typesafe_sdk, mcp, ast_grep_py" 2>/dev/null; }
 
