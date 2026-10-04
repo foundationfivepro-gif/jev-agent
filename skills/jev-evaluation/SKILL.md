@@ -17,6 +17,11 @@ Jev is an **evaluation model**, not a language model. Give it shared state and t
 questions; it returns choices, scores and probability distributions, all evaluated in
 parallel. Reach for it when the output is a *decision*, not prose.
 
+**Building a use case** (sort a pile of records, triage an inbox, search by meaning, live
+tagging, icon or component picking): read `references/use-cases.md`. It has the shared
+recipe (fixed labels, per-record binding, certainty routing, validation set) and a
+catalogue of what is already built here.
+
 ## Endpoint
 
 ```
