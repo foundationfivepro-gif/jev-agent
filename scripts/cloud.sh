@@ -14,9 +14,11 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMOTE=false; [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] && REMOTE=true
 # scripts/cloud-user.sh already runs both at user scope; don't run them twice.
-if [ -d "$HOME/.jev-agent" ] && [ "$ROOT" != "$HOME/.jev-agent" ]; then REMOTE=false; fi
+USER_SCOPE=false
+if [ -d "$HOME/.jev-agent" ] && [ "$ROOT" != "$HOME/.jev-agent" ]; then REMOTE=false; USER_SCOPE=true; fi
 
-have_deps() { python3 -c "import typesafe_sdk, mcp, ast_grep_py" 2>/dev/null; }
+# Import what mcp_server.py imports: an mcp 1.x install has `mcp` but not this.
+have_deps() { python3 -c "import typesafe_sdk, ast_grep_py, mcp.server.mcpserver" 2>/dev/null; }
 
 # stdout belongs to the hook or MCP protocol, so pip talks to stderr only. The
 # lock stops the SessionStart hook and the MCP server installing at once.
@@ -37,6 +39,12 @@ case "${1:-}" in
     exec python3 "$ROOT/hooks.py" "${2:-}"
     ;;
   mcp)
+    # Project .mcp.json outranks the user-scope entry, so defer to that install
+    # (its venv has the right mcp) rather than system python3.
+    if $USER_SCOPE; then
+      PY="$HOME/.jev-agent/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+      exec "$PY" "$HOME/.jev-agent/mcp_server.py"
+    fi
     $REMOTE && deps
     exec python3 "$ROOT/mcp_server.py"
     ;;
