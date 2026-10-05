@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install jev-agent for Claude Code.
 #
-#   skills      SKILL.md files -> ~/.claude/skills. Only their frontmatter loads
-#               until a description matches, so they cost almost nothing idle.
+#   skills      skills/* linked into ~/.claude/skills and ~/.agents/skills;
+#               REPO_ONLY skills load only inside this checkout.
 #
 #   hooks       hooks.py into ~/.claude/settings.json: the command gate, the
 #               subagent router and return contract, the per-prompt note and the
@@ -19,18 +19,28 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-all}"
 
+# Repo-only skills load from .claude/skills inside this checkout; the rest are
+# linked (not copied) into the user skill dirs so edits here apply at once.
+REPO_ONLY="jev-evaluation skill-routing"
+
 install_skills() {
-  local dir="$HOME/.claude/skills"
-  mkdir -p "$dir"
-  for skill in "$HERE"/skills/*/; do
-    name="$(basename "$skill")"
-    rm -rf "${dir:?}/$name"
-    cp -R "$skill" "$dir/$name"
+  local name dir n=0
+  for dir in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+    mkdir -p "$dir"
+    for skill in "$HERE"/skills/*/; do
+      name="$(basename "$skill")"
+      rm -rf "${dir:?}/$name"
+      case " $REPO_ONLY " in *" $name "*) continue ;; esac
+      ln -s "${skill%/}" "$dir/$name"
+    done
   done
-  echo "  installed $(ls -1 "$HERE"/skills | wc -l | tr -d ' ') skills -> $dir"
+  mkdir -p "$HERE/.claude/skills"
+  for name in $REPO_ONLY; do ln -sfn "../../skills/$name" "$HERE/.claude/skills/$name"; done
+  n=$(ls -1 "$HERE"/skills | wc -l | tr -d ' ')
+  echo "  linked $n skills -> ~/.claude/skills and ~/.agents/skills ($REPO_ONLY: this repo only)"
   echo
-  echo "  NOTE: these are the CLI/desktop copies. Skills saved to your Claude"
-  echo "  account (via the app) are what sync to mobile — files on disk do not."
+  echo "  NOTE: skills saved to your Claude account (via the app) sync separately;"
+  echo "  delete account copies of these skills or they are listed twice."
 }
 
 print_mcp() {
