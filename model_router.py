@@ -34,14 +34,17 @@ MIN_CONFIDENCE = 0.75
 MECHANICAL_COMPLEXITY = 0.5
 MECHANICAL_CONFIDENCE = 0.5
 
-# Sonnet-first (owner decision 2026-10-02: Sonnet 5.5 handles everyday coding,
-# multi-file edits, research and agentic tool use). An uncertain route lands on
+# Sonnet-first (owner decision 2026-10-02: Sonnet 5.5 handles well-scoped everyday
+# coding and well-defined agent tasks; Anthropic places long-horizon agentic coding
+# and knowledge work on Opus 5.5). An uncertain route lands on
 # the floor tier — Sonnet — and climbs only where trying the floor first is
 # expected to cost more than going straight up. Heuristic, pending calibration
 # against outcomes: treating Jev's weight p on the higher tier as the chance the
 # floor falls short, floor-first costs floor + p * higher and going up costs
 # higher, so climbing pays from p >= 1 - floor/higher (0.5 at today's prices).
 # It ignores token-volume differences and latency; it tracks the price list.
+# Output rates, not input: cached input reads cost $0.20/MTok on both Sonnet and
+# Opus 5.5, so on cache-heavy subagents the tiers differ mostly in output.
 # Haiku is reached on an uncertain route only through the mechanical path.
 FLOOR_TIER = "sonnet"
 
@@ -59,13 +62,16 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "return a short answer",
                "cost_in": 1.0, "cost_out": 5.0, "tier": 1},
     "sonnet": {"id": "claude-sonnet-5-5",
-               "fit": "Everyday coding, research and agent work: code generation, "
-                      "multi-file edits, data analysis, content creation, agentic tool use",
+               "fit": "Well-scoped everyday coding and well-defined agent tasks: fixing "
+                      "bugs, iterating on features, code generation, multi-file edits, "
+                      "research, data analysis, content creation, agent tasks run repeatedly",
                "cost_in": 2.0, "cost_out": 10.0, "tier": 2},
     "opus":   {"id": "claude-opus-5-5",
-               "fit": "Complex agentic coding: large-scale refactoring, complex systems "
-                      "engineering and architecture, hard debugging, vision-heavy work, "
-                      "computer use, work where a wrong answer is expensive to detect",
+               "fit": "Long-horizon agentic coding and knowledge work, complex work that "
+                      "needs careful judgment: large-scale refactoring, complex systems "
+                      "engineering and architecture, hard debugging, open-ended tasks without "
+                      "a clear stopping point, vision-heavy work, computer use, work where a "
+                      "wrong answer is expensive to detect",
                "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
     "fable":  {"id": "claude-fable-5-1",
                "fit": "Frontier work Opus falls short on: agent sessions that run for "
