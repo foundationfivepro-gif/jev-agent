@@ -5,18 +5,11 @@ description: Decide whether putting a cheap evaluator in front of expensive work
 
 # Gating expensive work behind a cheap evaluator
 
-**Tools**: `jev_gate_command(command, cwd)` before a shell command that sends, publishes or
-deploys (local commands need no call; it returns allow for them without reaching Jev);
-`jev_classify_data(paths, content)` before sending content anywhere (local-only, no
-model call); `jev_select_context(...)` before reading files.
-
-Before spending a lot of tokens, spend a few deciding whether to. See `jev-evaluation` for the
-API; this is about when the trade pays.
+Before spending a lot of tokens, spend a few deciding whether to.
 
 **Where it pays.** Relevance-score before reading (the highest-leverage gate — reading is the
 largest consumer). Verify a compression kept the facts the next step needs. Route among many
 tools without putting every schema in context. Score a proposed command against policy.
-Choosing among many skills: see `skill-routing` (`jev_route_skill`).
 
 **Batch, because only input is billed.** All questions in one request run in parallel against
 shared state. Score 40 files in one call with 40 questions, not 40 calls.
@@ -31,13 +24,9 @@ escalate the uncertain middle to a real model or a human rather than guessing.
 
 **Gate on the mass of the bad outcome, not on confidence.** A safe command with P(block)=0 and
 confidence 0.69 fails a 0.90 confidence gate — and a gate that fires on safe input is a gate
-people switch off.
+people switch off. The converse also holds: a model's "review" label on plain local work is
+not risk; overrule it when P(block) is near zero and nothing leaves the machine.
 
-**The converse holds: a "review" label is not risk.** The model calls plain file creation
-"review" — a HEIC-to-JPG conversion into a sandbox came back P(block)=0, impact 0.94, human
-0.20. `jev_gate_command` now overrules such a label to allow when P(block) ≤ 0.02, impact
-< 1.25, P(human) < 0.40 and no binary reaches past the machine (curl, git, gh, ssh, op, package
-managers — `EXTERNAL` in `permission_gate.py`). A `review` it still returns carries a reason:
-relay that reason and the exact command when you ask, ask once for a batch of related commands
-rather than per command, and never describe a gate as flagging "every" command without
-checking its `reason`.
+**Relay a review honestly.** When a gate returns `review`, give its reason and the exact
+command, ask once for a batch of related commands, and never claim it flagged "every" command
+without checking.
