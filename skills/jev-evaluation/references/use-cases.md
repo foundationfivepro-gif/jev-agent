@@ -21,8 +21,8 @@ cases", Oct 2026), not measurements from this repo. Re-measure before quoting th
    label you already know. Run Jev blind, count agreement, read the misses: the misses
    are where label descriptions need tightening. For `Noul`/`Score` fan-outs also run
    `canary.check_separation` on known-high and known-low items.
-6. **Jev picks; something else acts.** Jev's output is a label. Anything with external
-   effect (send, post, tag in a shared system) goes through `jev_check_action` or a human.
+6. **Jev picks; something else acts.** Jev's output is a label. Acting on it is the
+   agent's job under the user's own rules; Jev never approves or blocks.
 
 ```python
 from core import Choice, decide_batched

@@ -17,10 +17,9 @@ repositories whose CLAUDE.md says so.
                                             only when repository context is needed.
                                             With `skill_router.py on` (default off),
                                             also names the skill Jev picked; 800ms cap.
-    PreToolUse   Bash         gate-bash     denies the irreversible (no key needed);
-                                            runs jev_gate_command only on commands that
-                                            send, publish or deploy. Local commands get
-                                            no Jev call and no prompt.
+    PreToolUse   Bash         gate-bash     denies only the catastrophic (rm of root,
+                                            home or a wildcard); local, no key, no Jev
+                                            call. Everything else passes untouched.
     PreToolUse   Agent|Task   route-agent   appends RETURN_CONTRACT to every subagent
                                             prompt (local), and sets `model` via
                                             jev_route_model when none was chosen.
@@ -44,8 +43,8 @@ Three properties hold because this runs on every event:
     is a `deny`, reserved for the irreversible: dangerous constructs and
     recursive deletion of root, home or a wildcard.
 
-What leaves the machine: the prompt text (first MAX_TASK_CHARS) and, for
-commands that reach outside, the command line go to Jev (TypeSafe's API). Anything
+What leaves the machine: the prompt text (first MAX_TASK_CHARS) goes to Jev
+(TypeSafe's API). Shell commands are never sent. Anything
 credential-shaped is held back and not sent.
 
     python3 hooks.py install              # ~/.claude/settings.json, ~/.claude/CLAUDE.md
@@ -174,44 +173,14 @@ def gate_bash(data: dict) -> None:
     if not command.strip():
         return
 
-    def note(reason: str) -> None:
-        # Jev never prompts. A hook "ask" overrides the user's own allow rules, so its
-        # opinion goes to stderr (and the trace) and Claude Code's permission flow decides.
-        print(reason, file=sys.stderr)
-
-    # Local work (builds, tests, commits, installs, deletes inside the workspace)
-    # never reaches Jev. Claude Code's own permission rules decide everything
-    # except the irreversible, which is denied here.
+    # Only the catastrophic (rm of root, home or a wildcard) is denied, locally.
     kind, reason = triage(command)
     if kind == "block":
         _emit(_pre_tool("deny", f"jev: {reason}"))
         return
-    if kind == "local":
-        return
-
-    if _looks_secret(command):
-        note("jev: command contains credential-shaped material; not sent to Jev")
-        return
-
-    # Unconfigured is not an outage: leave the ordinary permission flow alone.
-    if not _have_key():
-        return
-
-    from core import TransportError
-    from permission_gate import gate
-
-    try:
-        d = gate(command, str(data.get("cwd") or "."))
-    except TransportError as exc:
-        note(f"jev unreachable ({exc})")
-        return
-
-    # A model verdict is judgement, not policy: it is recorded, never enforced. Only
-    # the deterministic layer above may `deny`. Nor do we say "allow": that would
-    # bypass the user's own permission rules.
-    final, reason = d.get("final"), d.get("reason", "")
-    if final in ("block", "review"):
-        note(f"jev: {final}: {reason}")
+    # Anything else is left to Claude Code's own permission flow. Jev is not
+    # consulted: it is an efficiency advisor, not a gatekeeper, and a verdict
+    # nobody enforces only costs a model call.
 
 
 def _with_contract(tool_input: dict) -> dict | None:

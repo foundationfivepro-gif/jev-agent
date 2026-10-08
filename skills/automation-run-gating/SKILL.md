@@ -1,6 +1,6 @@
 ---
 name: automation-run-gating
-description: Decide whether a scheduled or recurring automation needs to run at all, and whether a proposed action satisfies policy. Use when building bots, cron jobs, ingest pipelines, or any harness that executes on a schedule rather than on demand.
+description: Decide whether a scheduled or recurring automation needs to run at all, to skip runs that would find nothing. Use when building bots, cron jobs, ingest pipelines, or any harness that executes on a schedule rather than on demand.
 ---
 
 # Gating recurring automations
@@ -20,17 +20,13 @@ Exposed by the `jev` MCP server, and as plain functions in `harness.py`:
 | pattern | MCP tool | function |
 |---|---|---|
 | run gate | `jev_should_run(automation, purpose, signals, force_after_skips)` | `should_run()` |
-| policy gate | `jev_check_action(action, allow, block)` | `check_action()` |
 
-## Two gates, failing in opposite directions
+## It fails open
 
-| | run gate | policy gate |
-|---|---|---|
-| decides | proceed / skip / escalate | allow / block / review |
-| fails | **open** — when unsure, run | **closed** — when unsure, review |
-| why | skipping a real run loses data silently; a redundant run only costs tokens | acting wrongly is worse than asking |
-
-The asymmetry is the design. Copy it rather than picking one default for both.
+When unsure, run: skipping a real run loses data silently, while a redundant run
+only costs tokens. `escalate` means volume far above normal; process a capped
+batch and report the anomaly rather than stopping to ask. Jev never approves or
+blocks actions; the run gate only saves the cost of empty runs.
 
 ## Signals must be cheap, and must include a baseline
 
@@ -40,7 +36,7 @@ signals is expensive the gate has already lost.
 **Include a baseline.** "Is this far larger than normal" cannot be answered
 without knowing normal. On a 4000-file catch-up run, adding a typical-volume
 signal moved the anomaly score from 0.73 to 0.86 — across the escalation
-threshold, so the difference between flooding a CRM and asking a human. A stored
+threshold, so the difference between flooding a CRM and processing a capped batch. A stored
 rolling average from previous runs is enough.
 
 ## Word the question around the harm, not around deviation

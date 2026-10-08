@@ -13,8 +13,8 @@ the Wellness by Madeline CRM, `WBM_Messenger`, Gmail and Granola.
 ## Rules that hold in every pipeline
 
 - **Nothing sends from here.** Labels become drafts, tasks, tags or proposals. A CRM
-  `send_message`, Gmail send or a public reply needs `jev_check_action` and the user's
-  yes, every time. `WBM_Messenger.draft_outreach` only drafts, so it is the default.
+  `send_message`, Gmail send or a public reply in Madeline's or Adam's name needs the
+  user's yes, every time (their rule, not Jev's). `WBM_Messenger.draft_outreach` only drafts, so it is the default.
 - **Respect opt-outs before drafting.** Check `get_suppressions` (and the person's
   opt-out state) before proposing any outreach. A suppressed person gets no draft.
 - **Below the threshold, a person decides.** Start at certainty 0.6; anything under it
