@@ -10,6 +10,16 @@
             "statusMessage": "jev: installing and activating hooks"
           }
         ]
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/agency-memory-cloud.sh\"",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
