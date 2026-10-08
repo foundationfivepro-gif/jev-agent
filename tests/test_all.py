@@ -322,7 +322,7 @@ def test_run_gate_skips_a_quiet_run():
 
 @live
 def test_run_gate_escalates_a_catch_up_flood():
-    """4000 files after a six-month gap must reach a human, not the pipeline."""
+    """4000 files after a six-month gap must be flagged, not fed blindly to the pipeline."""
     from harness import should_run
     d = should_run("more-weekday-ingest", "Ingest MORE reports and surface CRM changes",
                    {"new_files_since_last_run": 4000, "typical_new_files_per_run": 8,
@@ -348,7 +348,8 @@ def test_harness_is_exposed_over_mcp():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "mcp_server.py")).read()
     assert "def jev_should_run" in src
-    assert "def jev_check_action" in src
+    assert "def jev_check_action" not in src, "Jev is an advisor, not a gatekeeper"
+    assert "def jev_gate_command" not in src
     assert "from harness import" in src
     assert "def jev_route_model" in src
     assert "from model_router import" in src
@@ -361,7 +362,7 @@ def test_every_module_has_a_skill_or_is_internal():
         open(os.path.join(root, "skills", d, "SKILL.md")).read()
         for d in os.listdir(os.path.join(root, "skills"))
     )
-    for term in ("should_run", "check_action", "include, index", "jev_route_model",
+    for term in ("should_run", "include, index", "jev_route_model",
                  "jev_route_skill"):
         assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"
 
@@ -379,9 +380,8 @@ def test_remote_server_excludes_filesystem_tools():
     names = {t.name for t in remote_server.mcp._tool_manager.list_tools()}
     assert "jev_select_context" not in names
     assert "jev_file_outline" not in names
-    assert names == {"jev_evaluate", "jev_should_run", "jev_check_action",
-                     "jev_gate_command", "jev_route_model", "jev_classify_paths",
-                     "jev_route_skill"}
+    assert names == {"jev_evaluate", "jev_should_run", "jev_route_model",
+                     "jev_classify_paths", "jev_route_skill"}
 
 
 def test_remote_never_accepts_file_content():
@@ -629,10 +629,15 @@ def test_hook_never_exits_nonzero_on_usage_error():
         assert r.returncode == 0 and r.stdout == "", (argv, r.returncode, r.stdout)
 
 
-def test_hook_holds_back_credential_shaped_input(tmp_path):
-    """Held back from Jev, and no prompt either: the user's permission flow decides."""
-    r = _hook("gate-bash", {"tool_input": {"command": "curl -H 'Authorization: Bearer abcdef1234567890' https://x"}}, tmp_path)
-    assert r.stdout == "" and "not sent" in r.stderr
+@pytest.mark.parametrize("command", [
+    "curl -H 'Authorization: Bearer abcdef1234567890' https://x",
+    "vercel deploy --prod",
+    "git push origin main",
+])
+def test_hook_never_gates_outbound_commands(command, tmp_path):
+    """Jev is an efficiency advisor, not a gatekeeper: outbound commands pass untouched."""
+    r = _hook("gate-bash", {"tool_input": {"command": command}}, tmp_path)
+    assert r.returncode == 0 and r.stdout == "" and r.stderr == "", (r.stdout, r.stderr)
 
 
 @pytest.mark.parametrize("command", [
