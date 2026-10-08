@@ -12,8 +12,6 @@ a server that has never seen your disk:
 
     jev_evaluate        arbitrary typed decisions
     jev_should_run      should a scheduled automation execute this time
-    jev_check_action    does a proposed action satisfy policy
-    jev_gate_command    is this shell command safe to run
     jev_route_model     cheapest Claude model that should pass a task
     jev_route_skill     which one skill should handle a request (you pass the list)
     jev_classify_paths  sensitivity from FILE PATHS ONLY
@@ -87,12 +85,11 @@ TOKEN = os.getenv("JEV_REMOTE_TOKEN", "")
 mcp = MCPServer(
     "jev-remote",
     instructions=(
-        "Jev decision tools that need no access to your filesystem. Use "
-        "jev_check_action before anything with external effect, jev_should_run "
-        "before a scheduled automation executes, and jev_gate_command before a "
-        "shell command that sends, publishes or deploys (local commands need no "
-        "call). For repository context selection, use the LOCAL jev "
-        "server — that capability cannot work remotely."
+        "Jev efficiency tools that need no access to your filesystem: "
+        "jev_route_model before delegating, jev_route_skill to pick a skill, and "
+        "jev_should_run before a scheduled automation executes. Jev never approves, "
+        "blocks or asks permission for an action. For repository context selection, "
+        "use the LOCAL jev server; that capability cannot work remotely."
     ),
 )
 
@@ -271,7 +268,7 @@ def jev_should_run(
     For recurring jobs, most executions find nothing worth the pipeline. Fails
     **open** — when uncertain it proceeds, because skipping a run that mattered
     loses data silently while a redundant run only costs tokens. `escalate` means
-    stop and get a person, not proceed carefully.
+    volume far above normal: process a capped batch and report it; do not stop.
     """
     _require_key()
     from harness import should_run
@@ -290,64 +287,6 @@ def jev_should_run(
         proceed_probability=round(d.proceed_probability, 3),
         novelty=round(d.novelty, 3), source=d.source,
     )
-
-
-@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True})
-def jev_check_action(
-    action: Annotated[str, Field(description="The proposed action, described plainly.")],
-    allow: Annotated[list[str], Field(description="Plain-English sentences describing what is permitted.")],
-    block: Annotated[list[str], Field(default=[], description=(
-        "Plain-English sentences describing what is forbidden. Evaluated FIRST and always wins."
-    ))] = [],
-) -> ActionPolicyDecision:
-    """
-    Judge a proposed action against allow/block policy written in plain English.
-
-    Use before anything with external effect — posting, emailing, paying,
-    deleting. Fails **closed**: anything not covered by either list comes back
-    `review`, never a silent allow. Do not act on `block` or `review`.
-    """
-    _require_key()
-    from harness import check_action
-
-    try:
-        d = check_action(action, allow, block)
-    except TransportError as exc:
-        return ActionPolicyDecision(verdict="review", reason=f"Jev unreachable ({exc}); failing closed.",
-                                    matched="", confidence=0.0)
-    return ActionPolicyDecision(verdict=d.verdict, reason=d.reason, matched=d.matched,
-                                confidence=round(d.confidence, 3))
-
-
-@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True})
-def jev_gate_command(
-    command: Annotated[str, Field(description="The exact shell command line.")],
-    cwd: Annotated[str, Field(default=".", description="Working directory it would run in.")] = ".",
-) -> CommandDecision:
-    """
-    Decide whether a shell command is safe to run.
-
-    Only commands that send, publish or deploy need this; local ones return allow
-    without a Jev call. Never execute a block whose source is 'policy'. A model
-    review or block is advice, never a veto: the user's permission mode decides.
-    The deterministic policy runs first and cannot be overridden: it resolves absolute paths, follows
-    wrappers like sudo, recurses into `sh -c` and splits pipelines, so
-    `bash -c 'rm -rf /'` is caught as readily as `rm -rf /`.
-    """
-    if not command.strip():
-        raise ValueError("command is empty")
-    kind, reason = triage(command)
-    if kind != "external":
-        return CommandDecision(decision="block" if kind == "block" else "allow", reason=reason,
-                               binaries=extract_commands(command), source="policy")
-    _require_key()
-    try:
-        d = gate(command, cwd)
-    except TransportError as exc:
-        return CommandDecision(decision="review", reason=f"Jev unreachable ({exc}); the user's permission mode decides.",
-                               binaries=extract_commands(command), source="unavailable")
-    return CommandDecision(decision=d["final"], reason=d.get("reason", ""),
-                           binaries=d.get("binaries", []), source=d.get("source", "model"))
 
 
 @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True})

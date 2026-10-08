@@ -50,10 +50,10 @@ mcp = MCPServer(
     "jev",
     instructions=(
         "Call jev_select_context BEFORE reading a repository's files (200k tokens -> 4k). "
-        "Call jev_classify_data before sending file contents to a third party. Shell "
-        "commands and subagent spawns are gated and routed by hooks; call jev_gate_command "
-        "(only for commands that send, publish or deploy) or jev_route_model yourself only "
-        "where no hook runs. These tools never act."
+        "Call jev_classify_data before sending file contents to a third party. Call "
+        "jev_route_model before delegating where no hook routes subagents. Jev is an "
+        "efficiency advisor: it picks cheaper models, context and skills. It never "
+        "approves, blocks or asks permission for an action."
     ),
 )
 
@@ -297,51 +297,6 @@ def jev_select_context(
 
 @mcp.tool(
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
-                 "openWorldHint": True},
-)
-def jev_gate_command(
-    command: Annotated[str, Field(description="The exact shell command line you intend to run.")],
-    cwd: Annotated[str, Field(default=".", description="Working directory it would run in.")] = ".",
-) -> CommandDecision:
-    """
-    Whether a command that sends, publishes or deploys is safe: allow, review or
-    block. Local commands (builds, tests, commits, installs, workspace deletes)
-    need no call: they return allow without reaching Jev. Only rm of root, home
-    or a wildcard and a few irreversible constructs block (source 'policy'); never
-    execute those. A model review or block is advice, never a veto: if the user's
-    permission mode already allows the command (e.g. Bypass permissions), run it;
-    otherwise ask once for the batch and quote the reason.
-    """
-    if not command.strip():
-        raise ValueError("command is empty")
-
-    kind, reason = triage(command)
-    if kind != "external":
-        return CommandDecision(
-            decision="block" if kind == "block" else "allow", reason=reason,
-            binaries=extract_commands(command), source="policy",
-        )
-
-    _require_key()
-    try:
-        d = gate(command, cwd)
-    except TransportError as exc:
-        # Fail closed: an unreachable judge is not permission to proceed.
-        return CommandDecision(
-            decision="review",
-            reason=f"Jev unreachable ({exc}); the user's permission mode decides.",
-            binaries=extract_commands(command), source="unavailable",
-        )
-    probs = d.get("probabilities") or {}
-    return CommandDecision(
-        decision=d["final"], reason=d.get("reason", ""),
-        binaries=d.get("binaries", []), source=d.get("source", "model"),
-        block_probability=probs.get("block"), impact=d.get("impact"),
-    )
-
-
-@mcp.tool(
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
                  "openWorldHint": False},
 )
 def jev_classify_data(
@@ -475,8 +430,10 @@ def jev_should_run(
     ))] = None,
 ) -> ScheduledRunDecision:
     """
-    Whether a scheduled automation needs to run this time. Fails open (proceed when
-    unsure). `escalate` means anomalous signals: stop and ask a person.
+    Whether a scheduled automation needs to run this time, to save the cost of runs
+    that would find nothing. Fails open (proceed when unsure). `escalate` means the
+    volume is far above normal: process a capped batch and report the anomaly in the
+    run's output; do not stop to ask.
     """
     _require_key()
     from harness import should_run
@@ -494,42 +451,6 @@ def jev_should_run(
         decision=d.action, reason=d.reason,
         proceed_probability=round(d.proceed_probability, 3),
         novelty=round(d.novelty, 3), source=d.source,
-    )
-
-
-@mcp.tool(
-    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
-                 "openWorldHint": True},
-)
-def jev_check_action(
-    action: Annotated[str, Field(description="The proposed action, described plainly.")],
-    allow: Annotated[list[str], Field(description=(
-        "Plain-English sentences describing what is permitted. These are matched "
-        "semantically, so near-misses of the exact wording still resolve."
-    ))],
-    block: Annotated[list[str], Field(default=[], description=(
-        "Plain-English sentences describing what is forbidden. Evaluated FIRST and "
-        "always wins — an action matching both is blocked."
-    ))] = [],
-) -> ActionPolicyDecision:
-    """
-    Judge an action with external effect (post, email, pay, delete) against
-    plain-English allow/block policy. Fails closed: unlisted or hard-to-undo goes
-    to review. Do not act on block or review.
-    """
-    _require_key()
-    from harness import check_action
-
-    try:
-        d = check_action(action, allow, block)
-    except TransportError as exc:
-        # An unreachable judge is not permission to proceed.
-        return ActionPolicyDecision(
-            verdict="review", reason=f"Jev unreachable ({exc}); failing closed.",
-            matched="", confidence=0.0,
-        )
-    return ActionPolicyDecision(
-        verdict=d.verdict, reason=d.reason, matched=d.matched, confidence=round(d.confidence, 3),
     )
 
 

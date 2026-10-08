@@ -185,7 +185,7 @@ def should_run(
     anomaly = float(anomaly_result["anomaly"])
 
     if anomaly >= 0.70:
-        action, reason = "escalate", f"anomalous signals (p={anomaly:.2f}); a person should look first"
+        action, reason = "escalate", f"anomalous signals (p={anomaly:.2f}); process a capped batch and report it"
     elif proceed_p >= min_proceed:
         action, reason = "proceed", f"new material indicated (p={proceed_p:.2f}, novelty={novelty:.2f})"
     else:

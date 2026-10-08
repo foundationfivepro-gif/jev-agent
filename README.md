@@ -59,7 +59,8 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 | read less | `jev_select_context` before reading files | 508k → 3.9k tokens on a 188-file repo |
 | short subagent returns | `route-agent` appends a return contract to every subagent prompt: conclusion only, file:line references, under 250 words | the parent reads, and keeps in context for the rest of the session, a conclusion instead of a transcript |
 | cheapest sufficient model | `route-agent` routes every spawn without an explicit `model` | Sonnet first, Opus only when Jev's weight on it pays for skipping Sonnet; Haiku on mechanical work; Fable never, unless set explicitly |
-| no duplicate decisions | the policy tells Claude the hooks already gate commands and route spawns, so it does not also call `jev_gate_command` / `jev_route_model` | one tool round-trip and one Jev call per command and per spawn |
+| no gatekeeping | Jev never approves, blocks or prompts; shell commands are never sent to it | no Jev call per command, no permission stops |
+| no duplicate decisions | the policy tells Claude the hooks already route spawns, so it does not also call `jev_route_model` | one tool round-trip and one Jev call per spawn |
 | quiet by default | the per-prompt note is injected only when repository context is needed | nothing added to context on prompts that need no files |
 | small fixed cost | policy under 2,000 characters (loads into every session and subagent); tool descriptions cut from ~11k to ~6.7k characters | paid once per session and per subagent |
 
@@ -69,7 +70,7 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 |---|---|---|
 | `SessionStart` | `session` | one line, `jev hooks active: ...`, telling the policy that gating and routing are enforced here; local, no call |
 | `UserPromptSubmit` | `prompt` | one Jev call per prompt; a one-line note only when repository context is needed |
-| `PreToolUse` on `Bash` | `gate-bash` | local commands: no Jev call, no prompt. Outbound ones (push, curl, deploy, publish): `jev_gate_command`. Denying the irreversible is deterministic and needs no key |
+| `PreToolUse` on `Bash` | `gate-bash` | denies only rm of root, home or a wildcard (deterministic, no key). Every other command passes untouched; no Jev call, no prompt |
 | `PreToolUse` on `Agent\|Task` | `route-agent` | appends the return contract (local, no key); sets `model` via `jev_route_model` when none was chosen |
 | `PostToolUse` / `PostToolUseFailure` on `Agent\|Task` | `agent-outcome` | records whether the subagent returned or failed, keyed by `tool_use_id`; local, no call |
 
@@ -106,21 +107,17 @@ Because a hook runs on every event, it is built around three rules:
 ### Cowork, claude.ai and other sessions without the hooks
 
 The policy keys off the `jev hooks active` line, not off where it is installed. With the
-line, Claude leaves gating and routing to the hooks; without it, Claude calls
-`jev_gate_command` and `jev_route_model` itself. So one conditional rule covers every
-surface: a hooked Claude Code session never pays twice, and an unhooked one never goes
-ungated.
+line, Claude leaves subagent routing to the hooks; without it, Claude calls
+`jev_route_model` itself. So one conditional rule covers every surface and a hooked
+session never pays twice.
 
 To carry that rule to surfaces that do not read `~/.claude/CLAUDE.md`, put the same
 condition in your claude.ai personal preferences (Settings → Profile):
 
-> Before any action with external effect (sending, posting, deleting, paying, deploying),
-> call jev_check_action. Before sending file contents to an outside service, call
-> jev_classify_data; secret means stop. Before reading files to find something, call
-> jev_select_context. Unless the session context says "jev hooks active": call
-> jev_gate_command before shell commands that send, publish or deploy (never run
-> a policy block; model verdicts are advice; local commands need no call), and
-> jev_route_model before delegating (use the model it selects).
+> Jev is an efficiency advisor, never a gatekeeper. Before reading files to find
+> something, call jev_select_context. Before sending file contents to an outside
+> service, call jev_classify_data and never send a secret. Unless the session says
+> "jev hooks active", call jev_route_model before delegating and use the model it picks.
 
 There the tools come from the remote connector (`remote_server.py`, below).
 
@@ -168,10 +165,8 @@ or runs commands. `./install.sh mcp` prints the registration.
 |---|---|
 | `jev_select_context` | **before reading files** — 508k → 3.9k tokens on a 188-file repo |
 | `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
-| `jev_check_action` | before any action with external effect, against plain-English policy |
 | `jev_file_outline` | exported symbols without loading the file; local-only |
 | `jev_evaluate` | arbitrary typed decisions |
-| `jev_gate_command` | commands that send, publish or deploy; the Bash hook runs it, so call directly only where no hook runs |
 | `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Fable is never selected; set it explicitly |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
 | `jev_route_skill` | which one skill should handle a request, or `none` (pick normally). Local reads installed skills; remote takes the list. Per-message suggestion: `python3 skill_router.py on` (default off). See `skills/skill-routing` |
@@ -193,12 +188,12 @@ carries a subset of the tools to surfaces where no local process can run.
 
 ### What can and cannot go remote
 
-`remote_server.py` exposes five tools. Two are deliberately absent and one is
+`remote_server.py` exposes five tools, none of which gate actions. Two are deliberately absent and one is
 deliberately reduced:
 
 | tool | remote | why |
 |---|---|---|
-| `jev_evaluate`, `jev_should_run`, `jev_check_action`, `jev_gate_command`, `jev_route_skill` | yes | pure logic, judge what you pass them (the skill list is passed in) |
+| `jev_evaluate`, `jev_should_run`, `jev_route_model`, `jev_route_skill` | yes | pure logic, judge what you pass them (the skill list is passed in) |
 | `jev_select_context` | **no** | its saving comes from reading *your* repository; a remote version would have to upload the codebase to answer the same question |
 | `jev_file_outline` | **no** | same reason |
 | `jev_classify_data` → `jev_classify_paths` | reduced | the local version scans file **content** and never transmits it. A remote content scanner requires uploading the material it exists to protect — worse than none, because it is trusted. The remote variant takes paths only, and says so in its output |
@@ -293,10 +288,9 @@ agent. The economics differ: a coding agent is one long session with a large
 context, so the win is reducing context per task; a harness is many short runs at
 high frequency, so the win is **not running at all**.
 
-| | `should_run()` | `check_action()` |
-|---|---|---|
-| decides | does this scheduled execution need to proceed | does a proposed action satisfy policy |
-| fails | **open** — when unsure, run | **closed** — when unsure, review |
+`should_run()` decides whether a scheduled execution needs to proceed, and fails
+**open**: when unsure, run. (`check_action()` remains in `harness.py` as a library
+function but is no longer exposed as a tool: Jev advises on cost, it does not gate.)
 
 For a weekday job where ~70% of runs find nothing, ~180 full pipelines a year are
 avoided for roughly a cent of gating.
