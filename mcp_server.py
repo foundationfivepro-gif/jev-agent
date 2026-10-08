@@ -75,14 +75,37 @@ def _require_key() -> None:
 
 
 
+def _nested_worktree(parts: tuple[str, ...]) -> bool:
+    """`.claude/worktrees/<name>/...`: another checkout of the same repo, which only duplicates files."""
+    return any(a == ".claude" and b == "worktrees" for a, b in zip(parts, parts[1:]))
+
+
+def _git_files(root: Path) -> set[Path] | None:
+    """Tracked and untracked-but-not-ignored files when `root` is in a git repo, else None.
+    Ignored paths (traces, build output, caches) can be most of a tree's bytes."""
+    import subprocess
+
+    try:
+        r = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                           capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return {(root / f).resolve() for f in r.stdout.decode("utf-8", "replace").split("\0") if f}
+
+
 def _gather(root: Path, globs: list[str] | None) -> list[Path]:
     patterns = globs or ["**/*"]
     seen: dict[Path, None] = {}
+    tracked = _git_files(root)
     for pattern in patterns:
         for p in root.glob(pattern):
             if not p.is_file():
                 continue
-            if SKIP_DIRS & set(p.parts):
+            if SKIP_DIRS & set(p.parts) or _nested_worktree(p.parts):
+                continue
+            if tracked is not None and p.resolve() not in tracked:
                 continue
             if globs is None and p.suffix.lower() not in CODE_SUFFIXES:
                 continue
@@ -283,11 +306,15 @@ def jev_select_context(
         raise unreachable(exc, "locate files with Grep/Glob and read only the ones that "
                            "match the goal; do not read the whole tree.") from exc
 
+    excluded = set(packed.excluded)
     return ContextSelection(
         include=[by_id[c.id] for c in packed.included if c.id in by_id],
         index=packed.indexed,
         exclude_count=len(packed.excluded),
-        scores={by_id[k]: round(v, 3) for k, v in packed.scores.items() if k in by_id},
+        # Included/indexed paths only (as documented): returning every scanned file's score
+        # made the result ~95k chars on a 1,600-file tree, past the tool-output limit.
+        scores={by_id[k]: round(v, 3) for k, v in packed.scores.items()
+                if k in by_id and k not in excluded},
         tokens_before=packed.tokens_in,
         tokens_after=packed.tokens_out,
         saved_pct=100 - round(100 * packed.tokens_out / max(packed.tokens_in, 1)),
@@ -452,6 +479,29 @@ def jev_should_run(
         proceed_probability=round(d.proceed_probability, 3),
         novelty=round(d.novelty, 3), source=d.source,
     )
+
+
+@mcp.tool(
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True,
+                 "openWorldHint": False},
+)
+def jev_where(
+    task: Annotated[str, Field(description="The task in one or two sentences, as the owner asked it.")],
+) -> dict:
+    """
+    Local or cloud, and which model, before starting a session. Local rules, no key, ~0 ms.
+
+    Policy: run in a cloud session unless the task needs this Mac (Keychain or
+    1Password, a logged-in browser or desktop app, computer use, launchd, localhost,
+    local files outside a repo, hardware). Returns where, needs_mac, model
+    (Sonnet-first: mechanical->haiku, standard/multi-step->sonnet, frontier->opus)
+    and the reason.
+    """
+    import placement
+
+    if not task.strip():
+        raise ValueError("task is empty")
+    return placement.place(task)
 
 
 @mcp.tool(

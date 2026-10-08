@@ -13,8 +13,10 @@ repositories whose CLAUDE.md says so.
                                             any account-wide preference) can tell a
                                             hooked session from one with no hooks,
                                             such as Cowork. Local; no call.
-    UserPromptSubmit          prompt        one Jev call per prompt; a one-line note
-                                            only when repository context is needed.
+    UserPromptSubmit          prompt        one Jev call per prompt (4s budget); a one-line note
+                                            only when repository context is needed, plus once
+                                            per session where to run it (local vs cloud) and
+                                            the Sonnet-first model (placement.py; no call).
                                             With `skill_router.py on` (default off),
                                             also names the skill Jev picked; 800ms cap.
     PreToolUse   Bash         gate-bash     denies only the catastrophic (rm of root,
@@ -75,6 +77,8 @@ MARK_BEGIN = "<!-- jev-agent:begin -->"
 MARK_END = "<!-- jev-agent:end -->"
 MAX_TASK_CHARS = 4000
 HOOK_BUDGET_S = 20          # below Claude Code's 30s hook timeout, with margin
+# A prompt waits on this hook before Claude starts, so it gets far less: a late Jev means no note.
+PROMPT_BUDGET_S = int(os.environ.get("JEV_PROMPT_BUDGET_S", "4"))
 COMPLEXITY = ("mechanical", "standard", "multi-step", "frontier")
 
 # The one signal that gating and routing are enforced here. Rules that apply on
@@ -140,7 +144,7 @@ def _bypassing(data: dict) -> bool:
 _FALLBACK: dict | None = None
 
 
-def _arm_budget(fallback: dict | None) -> None:
+def _arm_budget(fallback: dict | None, seconds: int = HOOK_BUDGET_S) -> None:
     """Answer before Claude Code gives up on us. Silence past the deadline is an ungated call."""
     global _FALLBACK
     _FALLBACK = fallback
@@ -150,11 +154,11 @@ def _arm_budget(fallback: dict | None) -> None:
     def fire(_signum, _frame):
         if _FALLBACK is not None:
             _emit(_FALLBACK)
-        print(f"jev: no answer within {HOOK_BUDGET_S}s", file=sys.stderr)
+        print(f"jev: no answer within {seconds}s", file=sys.stderr)
         os._exit(0)
 
     signal.signal(signal.SIGALRM, fire)
-    signal.alarm(HOOK_BUDGET_S)
+    signal.alarm(seconds)
 
 
 def _looks_secret(text: str) -> bool:
@@ -411,7 +415,11 @@ def prompt(data: dict) -> None:
     if not isinstance(text, str):
         return
     text = text.strip()
-    if len(text) < 20 or _looks_secret(text) or not _have_key():
+    if len(text) < 20 or _looks_secret(text):
+        return
+    if not _have_key():
+        # No Jev: the placement line still needs nothing but local rules.
+        _emit_notes([n for n in [_placement_note(text, data, None)] if n])
         return
 
     notes = []
@@ -438,12 +446,46 @@ def prompt(data: dict) -> None:
     # Injected text stays in context for the rest of the session, so the note
     # is sent only when it changes what Claude does next: read files through
     # jev_select_context rather than one by one.
-    if r is not None and float(r.answers["repo"].value) >= 0.5:
-        label = COMPLEXITY[max(0, min(3, round(float(r.value("complexity")))))]
+    complexity = None
+    if r is not None:
+        try:
+            complexity = float(r.value("complexity"))
+        except (TypeError, ValueError):
+            complexity = None
+    if r is not None and float(r.answers["repo"].value) >= 0.5 and complexity is not None:
+        label = COMPLEXITY[max(0, min(3, round(complexity)))]
         notes.append(f"jev: {label} task; call jev_select_context before reading files.")
+    placed = _placement_note(text, data, complexity)
+    if placed:
+        notes.append(placed)
+    _emit_notes(notes)
+
+
+def _emit_notes(notes: list[str]) -> None:
     if notes:
         _emit({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                       "additionalContext": "\n".join(notes)}})
+
+
+def _placement_note(text: str, data: dict, complexity: float | None) -> str | None:
+    """Local-or-cloud plus the model, once per session (first substantive prompt). Local rules, no call."""
+    try:
+        import placement
+
+        sid = "".join(ch for ch in str(data.get("session_id") or "") if ch.isalnum() or ch in "-_")[:80]
+        if not sid:                  # once-per-session needs a session; no id, no note
+            return None
+        marker = Path(os.environ["JEV_TRACE_DIR"]).parent / "placement-notes" / sid
+        if marker.exists():
+            return None
+        decision = placement.place(text, complexity=complexity)
+        line = placement.note(decision, remote=os.environ.get("CLAUDE_CODE_REMOTE") == "true")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(decision))
+        return line
+    except Exception as exc:  # a suggestion is never worth a failed prompt
+        print(f"jev placement: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
 
 
 def _skill_note(text: str, data: dict) -> str | None:
@@ -664,7 +706,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     global _FALLBACK
-    _arm_budget(FALLBACK[args.cmd])
+    _arm_budget(FALLBACK[args.cmd], PROMPT_BUDGET_S if args.cmd == "prompt" else HOOK_BUDGET_S)
     try:
         data = _read_stdin()
         if _bypassing(data):

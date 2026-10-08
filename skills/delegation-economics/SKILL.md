@@ -53,3 +53,7 @@ compression. One whose transcript the parent re-reads has thrown the advantage a
 In Claude Code a hook does this for every spawn without a `model` and appends a return
 contract, so call it yourself only where no hook runs. Catalog, prices and the climb rule:
 [references/models.md](references/models.md).
+
+## Where to run: local or cloud
+
+`jev_where(task=...)` (or `python3 placement.py "task"`) answers before a session starts: `where` is `cloud` unless the task needs this Mac (Keychain or 1Password, a logged-in browser or desktop app, computer use, launchd, localhost, local files outside a repo, hardware), plus a Sonnet-first `model`. The owner minimises local sessions, so dispatchers (Grok Bot, routines, Codex) start cloud sessions for everything else. In a hooked session the prompt hook prints this once per session.

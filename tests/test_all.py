@@ -363,7 +363,7 @@ def test_every_module_has_a_skill_or_is_internal():
         for d in os.listdir(os.path.join(root, "skills"))
     )
     for term in ("should_run", "include, index", "jev_route_model",
-                 "jev_route_skill"):
+                 "jev_route_skill", "jev_where"):
         assert term.split("(")[0] in skills or term in skills, f"undocumented: {term}"
 
 
@@ -777,8 +777,10 @@ def test_project_hooks_mirror_install_and_stay_cloud_only(tmp_path):
     import hooks
 
     s = json.loads(open(os.path.join(ROOT, ".claude", "settings.json")).read())
+    # Only jev's own entries: the repo also carries other hooks (e.g. the Agency Memory cloud hook).
     wired = {(event, g.get("matcher"), h["command"].rsplit(" ", 1)[-1])
-             for event, groups in s["hooks"].items() for g in groups for h in g["hooks"]}
+             for event, groups in s["hooks"].items() for g in groups for h in g["hooks"]
+             if "agency-memory" not in h["command"]}
     assert wired == {
         ("SessionStart", None, "session"), ("UserPromptSubmit", None, "prompt"),
         ("PreToolUse", "Bash", "gate-bash"), ("PreToolUse", "Agent|Task", "route-agent"),
@@ -1280,3 +1282,74 @@ def test_cloud_repo_script_uses_the_full_router_when_jev_is_present(tmp_path):
     updated = out["hookSpecificOutput"]["updatedInput"]
     assert updated["model"] == "sonnet" and "find the retry logic" in updated["prompt"]
     assert len(updated["prompt"]) > len("find the retry logic")           # full hook added the contract
+
+
+# ------------------------------------------------------------------ placement
+
+def test_placement_prefers_cloud_and_names_mac_needs():
+    import placement
+    cloud = placement.place("Fix the estimate form phone validation in trifecta-web and open a PR")
+    assert cloud["where"] == "cloud" and cloud["needs_mac"] == [] and cloud["model"] == "sonnet"
+    for task, need in [
+        ("Read the gateway token from Keychain and rotate it", "keychain"),
+        ("Use op read to fetch the Stripe key", "1password"),
+        ("Log in to the Meta business console in Chrome and check spend", "browser-session"),
+        ("Reload the jev LaunchAgent with launchctl", "launchd"),
+        ("Check the dev server on localhost:3000", "localhost"),
+        ("Clean up files in ~/Downloads/old-exports", "local-files"),
+        ("Print the invoice on the office printer", "hardware"),
+    ]:
+        d = placement.place(task)
+        assert d["where"] == "local" and need in d["needs_mac"], (task, d)
+    # A repo path under ~/Projects is a repo, not a Mac-only file.
+    assert placement.place("Edit ~/Projects/active/jksavoy/index.html title")["where"] == "cloud"
+
+
+def test_placement_model_follows_complexity():
+    import placement
+    assert placement.place("Fix a typo in the README")["model"] == "haiku"
+    assert placement.place("Design the security audit and architecture for the CRM")["model"] == "opus"
+    assert placement.place("x", complexity=1.2)["model"] == "sonnet"
+    assert placement.place("x", complexity=0.2)["model"] == "haiku"
+    assert placement.place("x", complexity=2.9)["model"] == "opus"
+
+
+def test_placement_note_once_per_session_and_cloud_silence(tmp_path, monkeypatch):
+    import hooks
+    monkeypatch.setenv("JEV_TRACE_DIR", str(tmp_path / "traces"))
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
+    data = {"session_id": "s1", "prompt": "Fix the estimate form validation and open a PR"}
+    first = hooks._placement_note(data["prompt"], data, None)
+    assert first and "cloud session" in first
+    assert hooks._placement_note(data["prompt"], data, None) is None      # once per session
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    d2 = {"session_id": "s2", "prompt": "Fix the estimate form validation and open a PR"}
+    assert hooks._placement_note(d2["prompt"], d2, None) is None           # cloud + cloud-fit: say nothing
+    d3 = {"session_id": "s3", "prompt": "Read the token from Keychain"}
+    assert "needs the Mac" in hooks._placement_note(d3["prompt"], d3, None)
+
+
+def test_prompt_hook_has_a_short_budget():
+    import hooks
+    assert hooks.PROMPT_BUDGET_S <= 5 < hooks.HOOK_BUDGET_S
+
+
+def test_select_context_scores_only_selected(tmp_path, monkeypatch):
+    """Scores cover included/indexed paths only, and nested .claude/worktrees are skipped."""
+    import mcp_server
+    (tmp_path / "a.py").write_text("def a(): pass\n")
+    (tmp_path / ".claude" / "worktrees" / "w1").mkdir(parents=True)
+    (tmp_path / ".claude" / "worktrees" / "w1" / "a.py").write_text("def a(): pass\n")
+    files = mcp_server._gather(tmp_path, None)
+    assert [p.name for p in files] == ["a.py"] and ".claude" not in files[0].parts
+
+
+def test_select_context_skips_gitignored(tmp_path):
+    import mcp_server, subprocess
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("traces/\n")
+    (tmp_path / "traces").mkdir()
+    (tmp_path / "traces" / "t.json").write_text("{}")
+    (tmp_path / "b.py").write_text("x = 1\n")
+    assert sorted(p.name for p in mcp_server._gather(tmp_path, None)) == [".gitignore", "b.py"] or \
+        sorted(p.name for p in mcp_server._gather(tmp_path, None)) == ["b.py"]

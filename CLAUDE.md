@@ -6,3 +6,4 @@ A session-start note `jev hooks active` means hooks route every subagent spawn (
 
 - Before reading files to find something: `jev_select_context`; read `include`, `index` only when needed.
 - Before sending file contents to a third party: `jev_classify_data`; never send a `secret`.
+- Where to run: prefer cloud sessions; work locally only for Mac-only needs (Keychain/1Password, logged-in browser or apps, local files, launchd, hardware). `jev_where` decides.
