@@ -60,19 +60,26 @@ DEFAULT_CATALOG: dict[str, dict] = {
                "fit": "Classification, formatting, simple mechanical edits, "
                       "high-volume or latency-sensitive sub-agent tasks that "
                       "return a short answer",
-               "cost_in": 1.0, "cost_out": 5.0, "tier": 1},
+               "cost_in": 1.0, "cost_out": 5.0, "tier": 1,
+               # https://platform.claude.com/docs/en/build-with-claude/effort
+               # Haiku 5.5 defaults to medium; low is for short/simple work.
+               "efforts": ("low", "medium", "high", "xhigh")},
     "sonnet": {"id": "claude-sonnet-5-5",
                "fit": "Well-scoped everyday coding and well-defined agent tasks: fixing "
                       "bugs, iterating on features, code generation, multi-file edits, "
                       "research, data analysis, content creation, agent tasks run repeatedly",
-               "cost_in": 2.0, "cost_out": 10.0, "tier": 2},
+               "cost_in": 2.0, "cost_out": 10.0, "tier": 2,
+               # Sonnet 5.5 defaults to high; xhigh only earns its cost in evals.
+               "efforts": ("medium", "high", "xhigh")},
     "opus":   {"id": "claude-opus-5-5",
                "fit": "Long-horizon agentic coding and knowledge work, complex work that "
                       "needs careful judgment: large-scale refactoring, complex systems "
                       "engineering and architecture, hard debugging, open-ended tasks without "
                       "a clear stopping point, vision-heavy work, computer use, work where a "
                       "wrong answer is expensive to detect",
-               "cost_in": 4.0, "cost_out": 20.0, "tier": 3},
+               "cost_in": 4.0, "cost_out": 20.0, "tier": 3,
+               # Opus 5.5 defaults to medium; xhigh is long-horizon only.
+               "efforts": ("medium", "high", "xhigh")},
     "fable":  {"id": "claude-fable-5-1",
                "fit": "Frontier work Opus falls short on: agent sessions that run for "
                       "hours, multistep deep research, analysis carried through to a "
@@ -80,8 +87,33 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "design where a wrong structural decision is expensive to unwind. "
                       "Never routine tasks, and not for ordinary multi-step work that "
                       "Opus handles",
-               "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True},
+               "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True,
+               "efforts": ("medium", "high", "xhigh", "max")},
 }
+
+
+def _routes(eligible: Mapping[str, Mapping]) -> dict[str, str]:
+    """One menu means Jev chooses capability tier and work depth together."""
+    return {
+        f"{name}+{effort}": (
+            f"{spec['fit']}. Effort {effort}: choose low only for short/simple or "
+            "latency-sensitive work; medium for balanced work; high for hard coding "
+            "or reasoning; xhigh only for long-horizon, capability-sensitive work."
+        )
+        for name, spec in eligible.items()
+        for effort in spec.get("efforts", ())
+    }
+
+
+def _split_route(value: object, eligible: Mapping[str, Mapping]) -> tuple[str | None, str | None]:
+    """Accept old model-only answers as model-only, for compatibility."""
+    raw = str(value)
+    model, sep, effort = raw.partition("+")
+    if model not in eligible:
+        return None, None
+    if not sep:
+        return model, None
+    return (model, effort) if effort in eligible[model].get("efforts", ()) else (model, None)
 
 def available_catalog(catalog: Mapping[str, Mapping] = DEFAULT_CATALOG) -> dict[str, dict]:
     """
@@ -208,17 +240,18 @@ def route_model(
         _trace("model_router", {"task": task}, decision, meta=trace_meta)
         return decision
 
-    criteria = {k: v["fit"] for k, v in eligible.items()}
+    routes = _routes(eligible)
 
     state = {
         "task": task,
         "needs_browser": needs_browser,
-        "candidates": {k: {"fit": v["fit"], "relative_cost": v["cost_out"]} for k, v in eligible.items()},
-        "objective": "lowest total cost that still passes acceptance",
+        "candidates": {k: {"fit": v["fit"], "relative_cost": v["cost_out"],
+                             "efforts": v.get("efforts", ())} for k, v in eligible.items()},
+        "objective": "lowest total cost that still passes acceptance; choose model and effort together",
     }
     result = decide(state, {
-        "model": Choice(instructions="Which eligible model is the cheapest sufficient route?" + UNTRUSTED,
-                        criteria=criteria),
+        "model": Choice(instructions=("Which eligible model+effort route is the cheapest sufficient "
+                                       "route? Choose exactly one combined key." + UNTRUSTED), criteria=routes),
         "complexity": Score(instructions="Complexity of the complete task",
                             criteria=["mechanical", "standard", "multi-step", "frontier"]),
     })
@@ -227,7 +260,7 @@ def route_model(
     # An uncertain route goes to the floor tier unless a higher tier's weight
     # pays for skipping it (see FLOOR_TIER); never below the floor.
     ordinary = eligible
-    proposed = str(answer.value)
+    proposed, proposed_effort = _split_route(answer.value, eligible)
     complexity = result.value("complexity")
 
     threshold = min_confidence
@@ -250,7 +283,9 @@ def route_model(
 
     decision = {
         "selected": selected,
-        "proposed": answer.value,
+        "proposed": proposed,
+        "effort": proposed_effort if selected == proposed else None,
+        "proposed_effort": proposed_effort,
         "confidence": answer.certainty,
         "threshold": threshold,
         "complexity": complexity,
