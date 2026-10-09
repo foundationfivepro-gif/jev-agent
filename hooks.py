@@ -23,8 +23,11 @@ repositories whose CLAUDE.md says so.
                                             home or a wildcard); local, no key, no Jev
                                             call. Everything else passes untouched.
     PreToolUse   Agent|Task   route-agent   appends RETURN_CONTRACT to every subagent
-                                            prompt (local), and sets `model` via
-                                            jev_route_model when none was chosen.
+    prompt (local), and sets `model` via
+                                            jev_route_model when none was chosen. The
+                                            Agent|Task hook input has no documented
+                                            `effort` field, so effort remains the
+                                            subagent configuration's default.
     PostToolUse(Failure)      agent-outcome records how that subagent ended, keyed by
                  Agent|Task                 tool_use_id, so a route can be judged by
                                             what it produced. Local; no key, no call.
@@ -203,7 +206,10 @@ def route_agent(data: dict) -> None:
        returns is read by the parent at the parent's price and stays in its
        context for the rest of the session, so a short return is where
        delegation's saving is actually made or lost.
-    2. If no model was chosen, route one with jev_route_model.
+    2. If no model was chosen, route one combined model+effort decision with
+       jev_route_model. Claude Code documents `effort` in static subagent
+       frontmatter, but not in mutable Agent|Task hook input, so only its
+       supported `model` field is applied here.
     """
     original = dict(data.get("tool_input") or {})
     tool_input = _with_contract(original) or original
@@ -271,10 +277,12 @@ def route_agent(data: dict) -> None:
         floor("no route")
         return
     confidence = d.get("confidence")
+    effort = d.get("effort")
+    effort_note = f"/{effort}" if isinstance(effort, str) else ""
     reason = (
-        f"jev_route_model: {selected} (proposed {d.get('proposed')}, "
+        f"jev_route_model: {selected}{effort_note} (proposed {d.get('proposed')}, "
         f"confidence {confidence:.2f})" if isinstance(confidence, float)
-        else f"jev_route_model: {selected}"
+        else f"jev_route_model: {selected}{effort_note}"
     )
     _FALLBACK = None
     _emit(_pre_tool("allow", reason, {**tool_input, "model": selected}))
