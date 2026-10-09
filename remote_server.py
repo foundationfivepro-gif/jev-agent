@@ -155,6 +155,7 @@ def _route_or_floor(task: str, cat: dict, **kw) -> dict:
 class ModelRouteDecision(BaseModel):
     selected: str = Field(description="haiku, sonnet or opus. Always a model: routing never stops work.")
     model_id: str | None
+    effort: str | None
     proposed: str | None
     confidence: float
     complexity: float | None = Field(description="0=mechanical, 1=standard, 2=multi-step, 3=frontier.")
@@ -314,6 +315,7 @@ def jev_route_model(
     chosen = cat.get(d["selected"], {})
     return ModelRouteDecision(
         selected=d["selected"], model_id=chosen.get("id"),
+        effort=d.get("effort"),
         proposed=None if d.get("proposed") is None else str(d["proposed"]),
         confidence=round(float(d.get("confidence", 0.0)), 3),
         complexity=None if d.get("complexity") is None else round(float(d["complexity"]), 2),

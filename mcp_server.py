@@ -220,6 +220,7 @@ class ModelRouteDecision(BaseModel):
         "routing never stops work."
     ))
     model_id: str | None = Field(description="API model id for `selected`.")
+    effort: str | None = Field(description="Effort chosen with the model; omit host effort flags when null.")
     proposed: str | None = Field(description="What Jev proposed before the confidence gate.")
     confidence: float = Field(description="Jev's certainty in `proposed`, 0..1.")
     complexity: float | None = Field(
@@ -536,6 +537,7 @@ def jev_route_model(
     return ModelRouteDecision(
         selected=d["selected"],
         model_id=chosen.get("id"),
+        effort=d.get("effort"),
         proposed=None if d.get("proposed") is None else str(d["proposed"]),
         confidence=round(float(d.get("confidence", 0.0)), 3),
         complexity=None if d.get("complexity") is None else round(float(d["complexity"]), 2),

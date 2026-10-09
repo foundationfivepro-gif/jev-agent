@@ -5,6 +5,18 @@ description: Work out whether delegating to a subagent or routing to a different
 
 # When delegation actually saves money
 
+## Model and effort are one decision
+
+When Jev routes an executor, choose its model tier and supported effort together
+in one route. The host applies the returned pair only; a missing or invalid part
+means omit both flags and keep the host default. Anthropic documents that effort
+governs thinking, tool calls and verification; use low for simple/latency work,
+medium for balanced work, high for hard coding, and xhigh only with measured
+long-horizon benefit: https://platform.claude.com/docs/en/build-with-claude/effort
+OpenAI documents model-dependent reasoning effort; use the model default where
+support is unclear and reserve high/xhigh for demonstrated hard reasoning value:
+https://developers.openai.com/api/docs/guides/reasoning
+
 "This subtask is easy, send it to a cheaper model" is wrong often enough to be expensive.
 Cost is dominated by **how much context is re-processed**, not by subtask difficulty.
 
