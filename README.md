@@ -58,7 +58,7 @@ Files on disk do **not** sync to Claude mobile; only skills saved to your Claude
 |---|---|---|
 | read less | `jev_select_context` before reading files | 508k → 3.9k tokens on a 188-file repo |
 | short subagent returns | `route-agent` appends a return contract to every subagent prompt: conclusion only, file:line references, under 250 words | the parent reads, and keeps in context for the rest of the session, a conclusion instead of a transcript |
-| cheapest sufficient model | `route-agent` routes every spawn without an explicit `model` | Sonnet first; Haiku on mechanical work; Opus never auto-picked (an explicit `model: opus` runs only with `JEV_ALLOW_OPUS_SOL=ADAMS_OK`, otherwise Sonnet); Fable never, unless set explicitly |
+| cheapest sufficient model | `route-agent` routes every spawn without an explicit `model` | Sonnet first; Haiku on mechanical work; Opus and Fable never auto-picked (an explicit `model: opus` or `model: fable` runs only with `JEV_ALLOW_OPUS_SOL=ADAMS_OK`, otherwise Sonnet) |
 | no gatekeeping | Jev never approves, blocks or prompts; shell commands are never sent to it | no Jev call per command, no permission stops |
 | no duplicate decisions | the policy tells Claude the hooks already route spawns, so it does not also call `jev_route_model` | one tool round-trip and one Jev call per spawn |
 | quiet by default | the per-prompt note is injected only when repository context is needed | nothing added to context on prompts that need no files |
@@ -167,7 +167,7 @@ or runs commands. `./install.sh mcp` prints the registration.
 | `jev_classify_data` | before sending file contents anywhere; local-only, no model call |
 | `jev_file_outline` | exported symbols without loading the file; local-only |
 | `jev_evaluate` | arbitrary typed decisions |
-| `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Fable is never selected; set it explicitly |
+| `jev_route_model` | the Agent hook runs it; call directly only where no hook runs. Opus and Fable are never selected; an explicit one needs `JEV_ALLOW_OPUS_SOL=ADAMS_OK` |
 | `jev_should_run` | before a scheduled automation executes — skip runs that would find nothing |
 | `jev_route_skill` | which one skill should handle a request, or `none` (pick normally). Local reads installed skills; remote takes the list. Per-message suggestion: `python3 skill_router.py on` (default off). See `skills/skill-routing` |
 

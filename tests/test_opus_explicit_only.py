@@ -83,7 +83,7 @@ def test_gate_explicit_opus(monkeypatch, name):
     assert gate_explicit_model(name) == (name, None)
 
 
-@pytest.mark.parametrize("name", ["haiku", "sonnet", "fable", "claude-sonnet-5-5"])
+@pytest.mark.parametrize("name", ["haiku", "sonnet", "claude-sonnet-5-5", "claude-haiku-4-5"])
 def test_gate_keeps_other_explicit_models(monkeypatch, name):
     monkeypatch.delenv("JEV_ALLOW_OPUS_SOL", raising=False)
     assert not is_opus(name)

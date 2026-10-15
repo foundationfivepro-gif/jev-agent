@@ -19,7 +19,7 @@ if { [ "$SUB" = "session" ] || [ "$SUB" = "mcp" ]; } && [ ! -f "$JEV/hooks.py" ]
 fi
 
 floor() {  # stdin: the hook payload. Pins a spawn with no explicit model to sonnet.
-  # Opus is explicit-only: an explicit Opus runs only with JEV_ALLOW_OPUS_SOL=ADAMS_OK.
+  # Opus and Fable are explicit-only: an explicit one runs only with JEV_ALLOW_OPUS_SOL=ADAMS_OK.
   python3 -c '
 import json, os, sys
 try:
@@ -30,10 +30,11 @@ ti = dict(data.get("tool_input") or {})
 named = str(ti.get("model") or "").strip().lower()
 why = "Jev not available in this VM"
 if named:
-    opus = named == "opus" or named.startswith("claude-opus")
-    if not opus or os.environ.get("JEV_ALLOW_OPUS_SOL", "").strip() == "ADAMS_OK":
+    tier = ("opus" if named == "opus" or named.startswith("claude-opus") else
+            "fable" if named == "fable" or named.startswith("claude-fable") else "")
+    if not tier or os.environ.get("JEV_ALLOW_OPUS_SOL", "").strip() == "ADAMS_OK":
         sys.exit(0)
-    why = "opus needs JEV_ALLOW_OPUS_SOL=ADAMS_OK"
+    why = tier + " needs JEV_ALLOW_OPUS_SOL=ADAMS_OK"
 ti["model"] = "sonnet"
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
     "permissionDecision": "allow",
