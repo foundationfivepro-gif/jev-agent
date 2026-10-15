@@ -210,11 +210,12 @@ def test_tool_router_filters_disabled_before_model():
 def test_model_router_cost_model_is_computed_not_asserted():
     from model_router import DEFAULT_CATALOG, estimate_costs
     cheapgap = estimate_costs(DEFAULT_CATALOG, context_mtok=.65, output_mtok=.12, tool_mtok=.23)
-    narrow = dict(DEFAULT_CATALOG)
-    # Opus is the fallback tier the router really uses; Fable is escalation-only
-    # and must not be the benchmark, so narrowing it would change nothing.
-    narrow["opus"] = {**narrow["opus"], "cost_out": 12.0}
-    tight = estimate_costs(narrow, context_mtok=.65, output_mtok=.12, tool_mtok=.23)
+    wide = dict(DEFAULT_CATALOG)
+    # Sonnet is the strongest tier the router really uses; Opus and Fable are
+    # explicit-only and must not be the benchmark, so widening the Sonnet gap is
+    # what moves the verdict.
+    wide["sonnet"] = {**wide["sonnet"], "cost_in": 4.0, "cost_out": 20.0}
+    tight = estimate_costs(wide, context_mtok=.65, output_mtok=.12, tool_mtok=.23)
     # The verdict must flip with the price gap rather than being hardcoded.
     assert cheapgap["delegation_wins"] != tight["delegation_wins"]
 
@@ -506,14 +507,16 @@ def test_route_model_uncertain_route_is_sonnet_first(monkeypatch):
 
     # Real traces from 2026-09-22 that used to escalate to Opus.
     assert route("sonnet", 0.54, {"sonnet": 0.63, "haiku": 0.37}) == "sonnet"
-    # Opus costs 2x Sonnet, so Sonnet-then-Opus is cheaper in expectation below 50% on Opus.
+    # The break-even arithmetic is unchanged (Opus costs 2x Sonnet) ...
     assert model_router.climb_mass(model_router.DEFAULT_CATALOG, "sonnet", "opus") == 0.5
     assert route("sonnet", 0.67, {"sonnet": 0.75, "opus": 0.25}) == "sonnet"
     assert route("sonnet", 0.55, {"sonnet": 0.58, "opus": 0.42}) == "sonnet"
     # Real traces 2026-09-25..10-01 that climbed to Opus while Jev preferred Sonnet.
     assert route("sonnet", 0.44, {"opus": 0.44, "sonnet": 0.55}) == "sonnet"
-    assert route("opus", 0.38, {"sonnet": 0.49, "opus": 0.50}) == "opus"
-    assert route("opus", 0.45, {"opus": 0.56, "sonnet": 0.44}) == "opus"
+    # ... but Opus is explicit-only now (2026-10-15), so weight on it never climbs.
+    assert route("opus", 0.38, {"sonnet": 0.49, "opus": 0.50}) == "sonnet"
+    assert route("opus", 0.45, {"opus": 0.56, "sonnet": 0.44}) == "sonnet"
+    assert route("opus", 0.95, {"opus": 0.95}) == "sonnet"
     assert route("haiku", 0.40, {"haiku": 0.6, "sonnet": 0.3, "opus": 0.1}) == "sonnet"
     # Weight on an unoffered tier is not weight on Opus.
     assert route("sonnet", 0.5, {"sonnet": 0.5, "fable": 0.3, "haiku": 0.2}) == "sonnet"
@@ -554,7 +557,8 @@ def _hook(sub, payload, tmp_path, env=None):
     """Run a hook with NO key available, so nothing here touches the network."""
     extra = env or {}
     env = {k: v for k, v in os.environ.items()
-           if k not in ("OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY", "JEV_MODELS")}
+           if k not in ("OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY", "JEV_MODELS",
+                        "JEV_ALLOW_OPUS_SOL")}
     env["JEV_ENV_FILE"] = str(tmp_path / "absent.env")
     env.update(extra)
     return subprocess.run(
@@ -693,10 +697,35 @@ def test_hook_gate_bash_is_silent_without_key(tmp_path):
 
 
 def test_hook_route_agent_respects_explicit_model(tmp_path):
-    r = _hook("route-agent", {"tool_input": {"prompt": "do a thing", "model": "opus"}}, tmp_path)
+    r = _hook("route-agent", {"tool_input": {"prompt": "do a thing", "model": "haiku"}}, tmp_path)
     assert r.returncode == 0, r.stderr
     updated = json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]
-    assert updated["model"] == "opus"
+    assert updated["model"] == "haiku"
+
+
+@pytest.mark.parametrize("named", ["opus", "claude-opus-5-5", "Opus"])
+def test_hook_explicit_opus_needs_adams_ok(tmp_path, named):
+    """Opus is explicit-only: named AND JEV_ALLOW_OPUS_SOL=ADAMS_OK, else Sonnet."""
+    spawn = {"tool_input": {"prompt": "review the plan", "model": named}}
+    r = _hook("route-agent", spawn, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["updatedInput"]["model"] == "sonnet"
+    assert "JEV_ALLOW_OPUS_SOL" in out["permissionDecisionReason"]
+    for wrong in ("yes", "1", "adams_ok"):
+        r = _hook("route-agent", spawn, tmp_path, env={"JEV_ALLOW_OPUS_SOL": wrong})
+        assert json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet", wrong
+    r = _hook("route-agent", spawn, tmp_path, env={"JEV_ALLOW_OPUS_SOL": "ADAMS_OK"})
+    assert json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == named
+
+
+def test_hook_env_file_cannot_grant_opus(tmp_path):
+    """The OK must come from the live environment, not a .env left lying around."""
+    envfile = tmp_path / "jev.env"
+    envfile.write_text("JEV_ALLOW_OPUS_SOL=ADAMS_OK\n")
+    r = _hook("route-agent", {"tool_input": {"prompt": "x", "model": "opus"}}, tmp_path,
+              env={"JEV_ENV_FILE": str(envfile)})
+    assert json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
 
 
 def test_session_hook_announces_the_exact_signal_the_policy_keys_off(tmp_path):
@@ -1131,7 +1160,8 @@ def test_route_fallback_never_restores_excluded_models(monkeypatch, server):
 
 def test_hook_floor_without_sonnet_is_still_an_explicit_model(tmp_path):
     """A restricted menu without Sonnet must not hand the spawn the parent's model."""
-    for menu, want in (("haiku", "haiku"), ("opus", "opus"), ("haiku,opus", "opus")):
+    # Opus is explicit-only, so an Opus-only menu still floors to Sonnet.
+    for menu, want in (("haiku", "haiku"), ("opus", "sonnet"), ("haiku,opus", "haiku")):
         r = _hook("route-agent", {"tool_input": {"prompt": "find the retry logic"}}, tmp_path,
                   env={"JEV_MODELS": menu})
         assert json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == want, menu
@@ -1191,11 +1221,17 @@ def test_hook_floor_survives_unwritable_traces_and_the_deadline(monkeypatch, tmp
 
     def slow(*a, **k):    # the deadline fires while Jev is still thinking
         assert hooks._FALLBACK["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
-        return {"selected": "opus", "confidence": 0.9, "proposed": "opus"}
+        return {"selected": "haiku", "confidence": 0.9, "proposed": "haiku"}
 
     monkeypatch.setattr(model_router, "route_model", slow)
     hooks.route_agent({"tool_input": {"prompt": "find the retry logic"}})
-    assert out[-1]["hookSpecificOutput"]["updatedInput"]["model"] == "opus"
+    assert out[-1]["hookSpecificOutput"]["updatedInput"]["model"] == "haiku"
+
+    # A router answer of Opus is never applied: it is not eligible.
+    monkeypatch.setattr(model_router, "route_model",
+                        lambda *a, **k: {"selected": "opus", "confidence": 0.9, "proposed": "opus"})
+    hooks.route_agent({"tool_input": {"prompt": "find the retry logic"}})
+    assert out[-1]["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
 
 
 def test_route_decision_survives_unwritable_traces(monkeypatch):
@@ -1203,7 +1239,7 @@ def test_route_decision_survives_unwritable_traces(monkeypatch):
     import model_router
 
     class Answer:
-        value, certainty, probabilities = "opus", 0.9, {"opus": 0.9}
+        value, certainty, probabilities = "haiku", 0.9, {"haiku": 0.9}
 
     class Result:
         answers = {"model": Answer()}
@@ -1216,7 +1252,7 @@ def test_route_decision_survives_unwritable_traces(monkeypatch):
 
     monkeypatch.setattr(model_router, "write_trace", no_disk)
     monkeypatch.setattr(model_router, "decide", lambda s, q: Result())
-    assert model_router.route_model("x")["selected"] == "opus"
+    assert model_router.route_model("x")["selected"] == "haiku"
 
 
 @pytest.mark.parametrize("server", ["mcp_server", "remote_server"])
@@ -1258,7 +1294,7 @@ def test_install_cloud_merges_into_a_repo_and_is_idempotent(tmp_path):
 def _cloud_script(sub, payload, env):
     base = {k: v for k, v in os.environ.items()
             if k not in ("OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "TYPESAFE_API_KEY",
-                         "JEV_MODELS", "CLAUDE_CODE_REMOTE")}
+                         "JEV_MODELS", "CLAUDE_CODE_REMOTE", "JEV_ALLOW_OPUS_SOL")}
     base.update(env)
     return subprocess.run(["bash", os.path.join(ROOT, "scripts", "cloud-repo.sh"), sub],
                           input=json.dumps(payload), capture_output=True, text=True, env=base, timeout=120)
@@ -1270,8 +1306,13 @@ def test_cloud_repo_script_is_a_noop_locally_and_floors_without_jev(tmp_path):
     no_jev = {"CLAUDE_CODE_REMOTE": "true", "JEV_AGENT_DIR": str(tmp_path / "absent")}
     out = json.loads(_cloud_script("route-agent", spawn, no_jev).stdout)
     assert out["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
-    kept = {"tool_input": {"prompt": "x", "model": "opus"}}
+    kept = {"tool_input": {"prompt": "x", "model": "haiku"}}
     assert _cloud_script("route-agent", kept, no_jev).stdout == ""         # explicit model kept
+    opus = {"tool_input": {"prompt": "x", "model": "opus"}}
+    out = json.loads(_cloud_script("route-agent", opus, no_jev).stdout)    # Opus needs the OK
+    assert out["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+    ok = {**no_jev, "JEV_ALLOW_OPUS_SOL": "ADAMS_OK"}
+    assert _cloud_script("route-agent", opus, ok).stdout == ""
     assert _cloud_script("gate-bash", {"tool_input": {"command": "ls"}}, no_jev).returncode == 0
 
 
@@ -1308,10 +1349,11 @@ def test_placement_prefers_cloud_and_names_mac_needs():
 def test_placement_model_follows_complexity():
     import placement
     assert placement.place("Fix a typo in the README")["model"] == "haiku"
-    assert placement.place("Design the security audit and architecture for the CRM")["model"] == "opus"
+    # Frontier work stays on Sonnet: Opus is explicit-only (2026-10-15).
+    assert placement.place("Design the security audit and architecture for the CRM")["model"] == "sonnet"
     assert placement.place("x", complexity=1.2)["model"] == "sonnet"
     assert placement.place("x", complexity=0.2)["model"] == "haiku"
-    assert placement.place("x", complexity=2.9)["model"] == "opus"
+    assert placement.place("x", complexity=2.9)["model"] == "sonnet"
 
 
 def test_placement_note_once_per_session_and_cloud_silence(tmp_path, monkeypatch):

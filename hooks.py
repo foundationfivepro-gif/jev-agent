@@ -220,11 +220,18 @@ def route_agent(data: dict) -> None:
             _emit(_pre_tool("allow", f"jev: return contract added ({why})", tool_input))
 
     if original.get("model"):
-        contract_only("explicit model kept")
+        from model_router import gate_explicit_model
+        # Checked before _load_env, so only the live environment can grant Opus.
+        model, why = gate_explicit_model(original["model"])
+        if why:
+            _emit(_pre_tool("allow", f"jev: {model} ({why})", {**tool_input, "model": model}))
+        else:
+            contract_only("explicit model kept")
         return
 
     from core import InvalidResponse, TransportError, write_trace
-    from model_router import available_catalog, eligible_models, floor_model, route_model
+    from model_router import (FLOOR_TIER, available_catalog, eligible_models, floor_model,
+                              route_model)
 
     _load_env()                      # JEV_MODELS may live in .env, not the environment
     cat = available_catalog()
@@ -233,7 +240,9 @@ def route_agent(data: dict) -> None:
     def floor_output(why: str) -> dict | None:
         # No route is never a reason to stop, nor to inherit the parent's model
         # (which may be Opus or Fable): the floor tier runs, Jev or no Jev.
-        model = floor_model(eligible)
+        # A menu left with only explicit-only tiers (Opus, Fable) still gets the
+        # floor tier, never the parent's model.
+        model = floor_model(eligible) or (FLOOR_TIER if cat else None)
         if model:
             return _pre_tool("allow", f"jev: {model} ({why})", {**tool_input, "model": model})
         return _pre_tool("allow", f"jev: return contract added ({why})", tool_input) if changed else None

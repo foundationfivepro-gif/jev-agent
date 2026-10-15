@@ -216,7 +216,7 @@ class ModelRouteDecision(BaseModel):
     """Which executor model to hand a task to."""
 
     selected: str = Field(description=(
-        "Pass as the Agent tool's model: haiku, sonnet or opus. Always a model: "
+        "Pass as the Agent tool's model: haiku or sonnet (opus is explicit-only). Always a model: "
         "routing never stops work."
     ))
     model_id: str | None = Field(description="API model id for `selected`.")
@@ -495,7 +495,7 @@ def jev_where(
     Policy: run in a cloud session unless the task needs this Mac (Keychain or
     1Password, a logged-in browser or desktop app, computer use, launchd, localhost,
     local files outside a repo, hardware). Returns where, needs_mac, model
-    (Sonnet-first: mechanical->haiku, standard/multi-step->sonnet, frontier->opus)
+    (Sonnet-first: mechanical->haiku, everything else->sonnet; Opus is explicit-only)
     and the reason.
     """
     import placement
@@ -522,10 +522,9 @@ def jev_route_model(
     Cheapest model that should pass a subtask. The Agent hook already does this
     for every spawn without an explicit model; call it only where no hook runs.
 
-    Pass `selected` as the model. Below 75% confidence it returns Sonnet unless
-    Jev's weight on Opus pays for skipping Sonnet (50% at today's prices);
-    mechanical tasks accept a cheap tier from 50%. Fable is never selected;
-    set it explicitly to use it. Jev unavailable means Sonnet, never a stop.
+    Pass `selected` as the model. Below 75% confidence it returns Sonnet;
+    mechanical tasks accept a cheap tier from 50%. Opus and Fable are never
+    selected; Opus runs only when named explicitly with JEV_ALLOW_OPUS_SOL=ADAMS_OK. Jev unavailable means Sonnet, never a stop.
     """
     if not task.strip():
         raise ValueError("task is empty")
