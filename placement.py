@@ -19,7 +19,8 @@ connectors, so ordinary code, PR, docs, data-via-connector and research work fit
 
 The model column maps the task's complexity (Jev's estimate when the caller has one,
 else a keyword guess) onto the Sonnet-first policy: mechanical -> haiku, standard and
-multi-step -> sonnet, frontier -> opus. Fable is never chosen here.
+multi-step -> sonnet, frontier -> sonnet. Opus and Fable are never chosen here
+(Opus is explicit-only, with JEV_ALLOW_OPUS_SOL=ADAMS_OK).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ MAC_SIGNALS: list[tuple[str, re.Pattern]] = [(name, re.compile(rx, re.I)) for na
 ]]
 
 COMPLEXITY = ("mechanical", "standard", "multi-step", "frontier")
-MODEL_FOR = {"mechanical": "haiku", "standard": "sonnet", "multi-step": "sonnet", "frontier": "opus"}
+MODEL_FOR = {"mechanical": "haiku", "standard": "sonnet", "multi-step": "sonnet", "frontier": "sonnet"}
 
 _MECHANICAL = re.compile(r"^\s*(rename|typo|bump|format|lint|reword|fix (a|the) typo|update the (date|version)|"
                          r"list|count|show|what (is|are)|which)\b", re.I)

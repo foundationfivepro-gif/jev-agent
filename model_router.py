@@ -48,6 +48,15 @@ MECHANICAL_CONFIDENCE = 0.5
 # Haiku is reached on an uncertain route only through the mechanical path.
 FLOOR_TIER = "sonnet"
 
+# Opus is explicit-only (owner rule 2026-10-15: never Opus or Sol for build work;
+# Opus only for review or planning, and only with Adam's OK). The router never
+# offers or picks it, whatever catalog it is handed, and a spawn that names it
+# explicitly keeps it only when JEV_ALLOW_OPUS_SOL=ADAMS_OK is set in the
+# process environment (a .env file cannot grant it). Without the OK an explicit
+# Opus becomes the floor tier.
+OPUS_SOL_ENV = "JEV_ALLOW_OPUS_SOL"
+OPUS_SOL_OK = "ADAMS_OK"
+
 # cost_in / cost_out are USD per million tokens, Anthropic first-party rates.
 # Keys are the names Claude Code's Agent tool accepts for its `model` parameter.
 # Fits follow Anthropic's model selection matrix (docs: choosing-a-model).
@@ -78,6 +87,8 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "a clear stopping point, vision-heavy work, computer use, work where a "
                       "wrong answer is expensive to detect",
                "cost_in": 4.0, "cost_out": 20.0, "tier": 3,
+               # Explicit-only: never offered to Jev, never selected (see OPUS_SOL_ENV).
+               "escalation_only": True, "requires_ok": True,
                # Opus 5.5 defaults to medium; xhigh is long-horizon only.
                "efforts": ("medium", "high", "xhigh")},
     "fable":  {"id": "claude-fable-5-1",
@@ -90,6 +101,30 @@ DEFAULT_CATALOG: dict[str, dict] = {
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True,
                "efforts": ("medium", "high", "xhigh", "max")},
 }
+
+
+def is_opus(name: object, spec: Mapping | None = None) -> bool:
+    """True for the opus tier however it is named: the key, or a claude-opus-* id."""
+    names = [str(name or "")]
+    if spec:
+        names.append(str(spec.get("id") or ""))
+    return any(n.strip().lower() == "opus" or n.strip().lower().startswith("claude-opus")
+               for n in names)
+
+
+def opus_allowed() -> bool:
+    """Adam's explicit OK, read from the live environment only."""
+    return os.environ.get(OPUS_SOL_ENV, "").strip() == OPUS_SOL_OK
+
+
+def gate_explicit_model(model: object) -> tuple[object, str | None]:
+    """
+    An explicitly named model, after the Opus rule: unchanged, or the floor tier
+    with the reason. Only Opus is gated; other explicit models are kept.
+    """
+    if is_opus(model) and not opus_allowed():
+        return FLOOR_TIER, f"opus needs {OPUS_SOL_ENV}={OPUS_SOL_OK}; using {FLOOR_TIER}"
+    return model, None
 
 
 def _routes(eligible: Mapping[str, Mapping]) -> dict[str, str]:
@@ -145,7 +180,8 @@ def estimate_costs(
     names = sorted(catalog, key=lambda k: catalog[k]["tier"])
     # The comparison is against the model the router actually falls back to,
     # so escalation-only tiers are not the benchmark.
-    ordinary = [n for n in names if not catalog[n].get("escalation_only")] or names
+    ordinary = [n for n in names
+                if not catalog[n].get("escalation_only") and not is_opus(n, catalog[n])] or names
     cheap, strong = catalog[names[0]], catalog[ordinary[-1]]
 
     pure = {
@@ -181,11 +217,15 @@ def _trace(*args, **kwargs) -> None:
 
 def eligible_models(catalog: Mapping[str, Mapping], *, max_cost_in: float = 1e9,
                     needs_browser: bool = False) -> dict[str, Mapping]:
-    """What the router may pick automatically. Shared by routing and every fallback."""
+    """
+    What the router may pick automatically. Shared by routing and every fallback.
+    Escalation-only tiers and Opus (under any name, even in a caller's catalog
+    override) are never eligible.
+    """
     return {
         k: v for k, v in catalog.items()
         if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
-        and not v.get("escalation_only")
+        and not v.get("escalation_only") and not is_opus(k, v)
     }
 
 
