@@ -53,7 +53,7 @@ FLOOR_TIER = "sonnet"
 # offers or picks it, whatever catalog it is handed, and a spawn that names it
 # explicitly keeps it only when JEV_ALLOW_OPUS_SOL=ADAMS_OK is set in the
 # process environment (a .env file cannot grant it). Without the OK an explicit
-# Opus becomes the floor tier.
+# Opus becomes the floor tier. Fable is gated the same way (Adam via Groktard, 2026-10-15).
 OPUS_SOL_ENV = "JEV_ALLOW_OPUS_SOL"
 OPUS_SOL_OK = "ADAMS_OK"
 
@@ -98,7 +98,9 @@ DEFAULT_CATALOG: dict[str, dict] = {
                       "design where a wrong structural decision is expensive to unwind. "
                       "Never routine tasks, and not for ordinary multi-step work that "
                       "Opus handles",
+               # Explicit-only and gated like Opus: needs JEV_ALLOW_OPUS_SOL=ADAMS_OK.
                "cost_in": 10.0, "cost_out": 50.0, "tier": 4, "escalation_only": True,
+               "requires_ok": True,
                "efforts": ("medium", "high", "xhigh", "max")},
 }
 
@@ -112,6 +114,20 @@ def is_opus(name: object, spec: Mapping | None = None) -> bool:
                for n in names)
 
 
+def is_fable(name: object, spec: Mapping | None = None) -> bool:
+    """True for the fable tier however it is named: the key, or a claude-fable-* id."""
+    names = [str(name or "")]
+    if spec:
+        names.append(str(spec.get("id") or ""))
+    return any(n.strip().lower() == "fable" or n.strip().lower().startswith("claude-fable")
+               for n in names)
+
+
+def needs_ok(name: object, spec: Mapping | None = None) -> bool:
+    """Tiers that run only when named explicitly with Adam's OK: Opus and Fable."""
+    return is_opus(name, spec) or is_fable(name, spec)
+
+
 def opus_allowed() -> bool:
     """Adam's explicit OK, read from the live environment only."""
     return os.environ.get(OPUS_SOL_ENV, "").strip() == OPUS_SOL_OK
@@ -119,11 +135,12 @@ def opus_allowed() -> bool:
 
 def gate_explicit_model(model: object) -> tuple[object, str | None]:
     """
-    An explicitly named model, after the Opus rule: unchanged, or the floor tier
-    with the reason. Only Opus is gated; other explicit models are kept.
+    An explicitly named model, after the Opus/Fable rule: unchanged, or the floor
+    tier with the reason. Opus and Fable are gated; other explicit models are kept.
     """
-    if is_opus(model) and not opus_allowed():
-        return FLOOR_TIER, f"opus needs {OPUS_SOL_ENV}={OPUS_SOL_OK}; using {FLOOR_TIER}"
+    if needs_ok(model) and not opus_allowed():
+        tier = "fable" if is_fable(model) else "opus"
+        return FLOOR_TIER, f"{tier} needs {OPUS_SOL_ENV}={OPUS_SOL_OK}; using {FLOOR_TIER}"
     return model, None
 
 
@@ -181,7 +198,7 @@ def estimate_costs(
     # The comparison is against the model the router actually falls back to,
     # so escalation-only tiers are not the benchmark.
     ordinary = [n for n in names
-                if not catalog[n].get("escalation_only") and not is_opus(n, catalog[n])] or names
+                if not catalog[n].get("escalation_only") and not needs_ok(n, catalog[n])] or names
     cheap, strong = catalog[names[0]], catalog[ordinary[-1]]
 
     pure = {
@@ -225,7 +242,7 @@ def eligible_models(catalog: Mapping[str, Mapping], *, max_cost_in: float = 1e9,
     return {
         k: v for k, v in catalog.items()
         if v["cost_in"] <= max_cost_in and (v.get("browser", True) or not needs_browser)
-        and not v.get("escalation_only") and not is_opus(k, v)
+        and not v.get("escalation_only") and not needs_ok(k, v)
     }
 
 

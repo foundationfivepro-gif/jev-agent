@@ -305,7 +305,7 @@ def jev_route_model(
     USD per million tokens: haiku 1/5, sonnet 2/10, opus 4/20, fable 10/50.
     Sonnet-first: below 75% confidence it returns Sonnet; mechanical tasks
     (complexity under 0.5) accept a cheap tier from 50%. Opus and Fable are never
-    selected; Opus runs only when named explicitly with JEV_ALLOW_OPUS_SOL=ADAMS_OK. Jev unavailable means Sonnet, never a stop.
+    selected; either runs only when named explicitly with JEV_ALLOW_OPUS_SOL=ADAMS_OK. Jev unavailable means Sonnet, never a stop.
     """
     if not task.strip():
         raise ValueError("task is empty")

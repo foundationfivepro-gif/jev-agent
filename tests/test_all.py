@@ -753,8 +753,14 @@ def test_hook_route_agent_adds_return_contract_once_without_a_key(tmp_path):
     again = _hook("route-agent", {"tool_input": {"prompt": prompt}}, tmp_path)
     out = json.loads(again.stdout)["hookSpecificOutput"]["updatedInput"]
     assert out["prompt"].count(hooks.RETURN_MARK) == 1 and out["model"] == "sonnet"
-    kept = _hook("route-agent", {"tool_input": {"prompt": prompt, "model": "fable"}}, tmp_path)
+    kept = _hook("route-agent", {"tool_input": {"prompt": prompt, "model": "haiku"}}, tmp_path)
     assert kept.stdout == ""                       # an explicit model is untouched
+    # Fable is explicit-only with Adam's OK (2026-10-15): without it, Sonnet.
+    fable = _hook("route-agent", {"tool_input": {"prompt": prompt, "model": "fable"}}, tmp_path)
+    assert json.loads(fable.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+    ok = _hook("route-agent", {"tool_input": {"prompt": prompt, "model": "fable"}}, tmp_path,
+               env={"JEV_ALLOW_OPUS_SOL": "ADAMS_OK"})
+    assert ok.stdout == ""                         # with the OK the explicit Fable is kept
 
 
 def test_hook_prompt_never_breaks_submission(tmp_path):

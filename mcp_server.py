@@ -524,7 +524,7 @@ def jev_route_model(
 
     Pass `selected` as the model. Below 75% confidence it returns Sonnet;
     mechanical tasks accept a cheap tier from 50%. Opus and Fable are never
-    selected; Opus runs only when named explicitly with JEV_ALLOW_OPUS_SOL=ADAMS_OK. Jev unavailable means Sonnet, never a stop.
+    selected; either runs only when named explicitly with JEV_ALLOW_OPUS_SOL=ADAMS_OK. Jev unavailable means Sonnet, never a stop.
     """
     if not task.strip():
         raise ValueError("task is empty")
