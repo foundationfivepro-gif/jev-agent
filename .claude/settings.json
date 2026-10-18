@@ -95,5 +95,9 @@
   },
   "enabledPlugins": {
     "typesafe@typesafe-ai": true
+  },
+  "env": {
+    "JEV_ROUTING_SKILL_VERSION": "1.1.0",
+    "JEV_ROUTING_SKILL_FILE": ".claude/skills/jev-routing/SKILL.md"
   }
 }
