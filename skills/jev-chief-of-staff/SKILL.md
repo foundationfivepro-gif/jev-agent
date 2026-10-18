@@ -1,6 +1,8 @@
 ---
 name: jev-chief-of-staff
 description: Run a Chief-of-Staff agent's small decisions (which worker acts next, is this source relevant, is the draft ready, does this need approval) on TypeSafe's Jev instead of a frontier LLM. Use when building or tuning a dispatcher that hands work between research, writing and review agents, or when an agent spends LLM calls on yes/no, route or score judgements.
+metadata:
+  version: "1.1.0"
 ---
 
 # Jev as the Chief of Staff's decision layer
@@ -10,7 +12,7 @@ An LLM creates the work, Jev decides what happens next, and code carries the dec
 | belongs to | examples |
 |---|---|
 | **the LLM** | research, plan, write, fill a form field |
-| **Jev** | route, score, approve, escalate |
+| **Jev** | advise routing, score, propose review/escalation |
 | **code** | exact rules (stop after 10 actions, spend cap), execution, saving files |
 
 ## 1. Find the decisions
@@ -18,37 +20,28 @@ In a job like *"Research three AI-agent tools and draft tomorrow's briefing for 
 the forks are: enough sources? which worker next? draft ready? Each is a Jev question;
 fetching, writing and saving are not. Replace the most frequent fork first, measure, repeat.
 
-## 2. Ask it
-`POST https://openrouter.ai/api/v1/systemone` with `OPENROUTER_API_KEY`, or
-`api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (same body). Model `jev-latest` on both.
-For SDK details load the `typesafe-ai` skill.
+## 2. Ask through the existing guarded service
 
-```json
-{"model": "jev-latest",
- "state": {
-   "request": "Compare three AI-agent tools for tomorrow's briefing",
-   "sources": [{"id": "s1", "title": "...", "summary": "..."}],
-   "gaps": ["no pricing for tool C"],
-   "draft": null},
- "questions": {
-   "next_worker": {"type": "choice", "instructions": "Which worker should act next?",
-     "criteria": {
-       "research": "Evidence is missing or a listed gap is unfilled",
-       "write":    "Evidence is sufficient and no draft exists yet",
-       "review":   "The request is unclear, or a complete draft exists"}},
-   "urgency": {"type": "score", "criteria": ["can wait", "today", "now"]},
-   "needs_publishing": {"type": "noul",
-     "instructions": "Does completing state.request require publishing or sending anything?"}}}
-```
+Routing knowledge version 1.1.0. Read the canonical `jev-routing` skill first
+(`agency-work/rules/skills/jev-routing/SKILL.md`, mirrored in this repo's
+`skills/jev-routing/SKILL.md`). It defines valid subscription model IDs, efforts,
+Cursor's strict allowlist, host routes and zero-spend verification examples.
 
-`choice` returns `choice`, `probabilities`, `confidence` (up to 255 options); `score` returns
-`score`, `probabilities`, `confidence`; `noul` returns the probability of yes in its `noul` field.
+Use the exact installed typed contract in `/opt/jev-decide/registry/` via
+`/usr/local/bin/jev-decide` on the VPS. Mac uses the verified `forwardspan-vps`
+SSH alias with the JSON producer inside the remote command and stdin closed.
+Cloud without a provisioned authenticated bridge reports `source=fallback`;
+never export credentials into a repository. Do not invent registry types.
 
-- **Question ids carry no meaning** — Jev never sees them. Put the requirement in
-  `instructions`, describe every option in `criteria`, and name the item when asking about
-  one: *"Consider ONLY source 's3' in state.sources"*.
-- **Give evidence, not status.** Sources, findings and gaps beat "the researcher finished".
-  Keep the original request in its own field.
+The 2026-10-18 evaluation read back configured model `jev-1.14.0`; the service
+owns that pin. Legacy direct-provider recipes and floating `jev-latest` are not
+the current model-selection interface. No service, hook or MCP implementation
+is changed by installing this knowledge. Apply privacy/spend gates locally
+before any Jev, MCP, SSH or provider call. Send permitted metadata only: Marsh
+skips Jev, Jefferies/employer data is blocked, and sensitive/internal requests
+stay held. Jev's advice never supplies action approval. No-spend verification
+uses only `--dry-run --selftest`, not live model inference. Simulator output is
+uncalibrated test evidence even when it says `auto_apply`.
 
 ## 3. Rebuild the menu every turn
 Offer only workers available now, current source ids, and options refreshed after any state
@@ -56,9 +49,9 @@ change. For long candidate lists, filter mismatches in code, score the rest, the
 over the shortlist.
 
 ## 4. Ask everything at once
-Questions in one request run in parallel on shared state and only input is billed, so batch
-everything that reads the same state. A decision that needs a fresh result waits for it.
-Look for repeated calls before paying for a faster model.
+Use only batching supported by the installed typed contract. A decision that needs
+a fresh result waits for it. Do not invent a batch API, assume provider pricing,
+or consume credits without the task's existing spending authority.
 
 ## 5. Thresholds
 - Confidence is not accuracy. Set thresholds from labelled examples of your own traffic.

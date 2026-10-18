@@ -7,6 +7,14 @@
     }
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index?__jev_path=/$1" }
-  ]
+    {
+      "source": "/(.*)",
+      "destination": "/api/index?__jev_path=/$1"
+    }
+  ],
+  "git": {
+    "deploymentEnabled": {
+      "jev-routing-v1.1.0": false
+    }
+  }
 }
