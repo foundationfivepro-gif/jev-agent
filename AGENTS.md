@@ -31,7 +31,8 @@ employer/internal sensitive content to Jev. Use only permitted task metadata.
 
 | Caller | Route |
 | --- | --- |
-| VPS `vps-c4c44889`, ubuntu or agent | Local `/usr/local/bin/jev-decide` |
+| VPS `vps-c4c44889`, ubuntu | Local `/usr/local/bin/jev-decide` |
+| VPS agent account | Use the local helper only if executable for that account. Rollout observed permission denied after the guarded lead-source release; report `source=fallback` and do not change permissions. |
 | Mac administrator | Verified SSH alias `forwardspan-vps` |
 | Box or other host | Inspect existing authenticated SSH aliases; use a verified VPS alias. Do not assume `vps` exists. |
 | Claude/Codex cloud | Use a provisioned authenticated bridge if available; otherwise report transport unavailable and `source=fallback`. Never copy credentials into a repo. |
