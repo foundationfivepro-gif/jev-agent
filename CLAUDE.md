@@ -6,4 +6,4 @@ A session-start note `jev hooks active` means hooks route every subagent spawn (
 
 - Before reading files to find something: `jev_select_context`; read `include`, `index` only when needed.
 - Before sending file contents to a third party: `jev_classify_data`; never send a `secret`.
-- Where to run: prefer cloud sessions; work locally only for Mac-only needs (Keychain/1Password, logged-in browser or apps, local files, launchd, hardware). `jev_where` decides.
+- Where to run: cloud sessions by default; the VPS or Grok Bot's computer for 1Password, saved-profile browser work, localhost or long-running jobs; the Mac only for Keychain, the owner's own Chrome, desktop apps, launchd, Mac files or hardware. `jev_where` decides.

@@ -68,4 +68,4 @@ contract, so call it yourself only where no hook runs. Catalog, prices and the c
 
 ## Where to run: local or cloud
 
-`jev_where(task=...)` (or `python3 placement.py "task"`) answers before a session starts: `where` is `cloud` unless the task needs this Mac (Keychain or 1Password, a logged-in browser or desktop app, computer use, launchd, localhost, local files outside a repo, hardware), plus a Sonnet-first `model`. The owner minimises local sessions, so dispatchers (Grok Bot, routines, Codex) start cloud sessions for everything else. In a hooked session the prompt hook prints this once per session.
+`jev_where(task=...)` (or `python3 placement.py "task"`) answers before a session starts: `where` is `cloud` by default; `vps` (the VPS or Grok Bot's computer, both run the claude/codex CLIs) for 1Password, saved-profile browser work, localhost or long-running jobs; `mac` only for Keychain, the owner's own Chrome, desktop apps or computer use, launchd, Mac home-folder files or hardware. The Mac is an option, rarely a requirement (owner, 2026-10-22). Plus a Sonnet-first `model`. In a hooked session the prompt hook prints this once per session.
