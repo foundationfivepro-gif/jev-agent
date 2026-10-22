@@ -1333,21 +1333,29 @@ def test_cloud_repo_script_uses_the_full_router_when_jev_is_present(tmp_path):
 
 # ------------------------------------------------------------------ placement
 
-def test_placement_prefers_cloud_and_names_mac_needs():
+def test_placement_prefers_cloud_then_vps_and_mac_only_when_required():
     import placement
     cloud = placement.place("Fix the estimate form phone validation in trifecta-web and open a PR")
     assert cloud["where"] == "cloud" and cloud["needs_mac"] == [] and cloud["model"] == "sonnet"
+    # Persistent-machine needs go to the VPS / Grok Bot's computer, not the Mac (owner 2026-10-22).
     for task, need in [
-        ("Read the gateway token from Keychain and rotate it", "keychain"),
         ("Use op read to fetch the Stripe key", "1password"),
         ("Log in to the Meta business console in Chrome and check spend", "browser-session"),
-        ("Reload the jev LaunchAgent with launchctl", "launchd"),
         ("Check the dev server on localhost:3000", "localhost"),
-        ("Clean up files in ~/Downloads/old-exports", "local-files"),
-        ("Print the invoice on the office printer", "hardware"),
+        ("Run the export nightly as a systemd timer", "long-running"),
     ]:
         d = placement.place(task)
-        assert d["where"] == "local" and need in d["needs_mac"], (task, d)
+        assert d["where"] == "vps" and need in d["needs_runner"] and d["needs_mac"] == [], (task, d)
+    # Only what physically lives on the Mac stays on the Mac.
+    for task, need in [
+        ("Read the gateway token from Keychain and rotate it", "keychain"),
+        ("Reload the jev LaunchAgent with launchctl", "launchd"),
+        ("Clean up files in ~/Downloads/old-exports", "local-files"),
+        ("Print the invoice on the office printer", "hardware"),
+        ("Open my Chrome and check the Cursor dashboard", "my-browser"),
+    ]:
+        d = placement.place(task)
+        assert d["where"] == "mac" and need in d["needs_mac"], (task, d)
     # A repo path under ~/Projects is a repo, not a Mac-only file.
     assert placement.place("Edit ~/Projects/active/jksavoy/index.html title")["where"] == "cloud"
 
@@ -1374,7 +1382,9 @@ def test_placement_note_once_per_session_and_cloud_silence(tmp_path, monkeypatch
     d2 = {"session_id": "s2", "prompt": "Fix the estimate form validation and open a PR"}
     assert hooks._placement_note(d2["prompt"], d2, None) is None           # cloud + cloud-fit: say nothing
     d3 = {"session_id": "s3", "prompt": "Read the token from Keychain"}
-    assert "needs the Mac" in hooks._placement_note(d3["prompt"], d3, None)
+    assert "owner's Mac" in hooks._placement_note(d3["prompt"], d3, None)
+    d4 = {"session_id": "s4", "prompt": "Use op read to fetch the Stripe key"}
+    assert "VPS" in hooks._placement_note(d4["prompt"], d4, None)
 
 
 def test_prompt_hook_has_a_short_budget():

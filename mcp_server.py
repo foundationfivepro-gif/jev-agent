@@ -492,9 +492,10 @@ def jev_where(
     """
     Local or cloud, and which model, before starting a session. Local rules, no key, ~0 ms.
 
-    Policy: run in a cloud session unless the task needs this Mac (Keychain or
-    1Password, a logged-in browser or desktop app, computer use, launchd, localhost,
-    local files outside a repo, hardware). Returns where, needs_mac, model
+    Policy: cloud session by default; "vps" (VPS or Grok Bot's computer) for 1Password,
+    saved-profile browser work, localhost or long-running jobs; "mac" only for Keychain,
+    the owner's own Chrome, desktop apps/computer use, launchd, Mac home files or
+    hardware. Returns where, needs_mac, needs_runner, model
     (Sonnet-first: mechanical->haiku, everything else->sonnet; Opus is explicit-only)
     and the reason.
     """
