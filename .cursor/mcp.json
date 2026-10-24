@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "agency-memory": {
+      "url": "https://agency-memory.foundationfivepro.workers.dev/mcp"
+    }
+  }
+}
